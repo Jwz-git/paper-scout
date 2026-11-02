@@ -20,3 +20,19 @@
 - 分别选取文本型、多栏或表格、扫描型 PDF 样本，核对页码、可读性和缺项；保留符合使用许可的测试样本。
 - 检查实际全文链接的可用性与相应使用许可。能打开不代表可以任意重新分发；不提交下载的论文。
 - 确认模型服务的数据处理政策、价格、结构化输出能力和可提供的用量统计；真实调用前确认可能产生的费用。
+
+## 2026-11-02 实现核验补记
+
+本轮只核验协议资料并执行离线测试，没有使用付费模型或真实检索／下载。OpenAI、Anthropic 文档网页分别遇到403／超时，不能声称本轮已直接读取这些网页；改用官方 SDK 中由 OpenAPI 生成的类型核对字段。该核验不证明第三方兼容服务或具体型号支持所有可选参数。
+
+| 实现要点 | 官方依据 |
+| --- | --- |
+| Chat `max_completion_tokens`、JSON格式参数 | [OpenAI Chat参数](https://raw.githubusercontent.com/openai/openai-python/main/src/openai/types/chat/completion_create_params.py) |
+| Responses内容块为 `output_text`，结构化格式在 `text.format`，上限为 `max_output_tokens` | [输出类型](https://raw.githubusercontent.com/openai/openai-python/main/src/openai/types/responses/response_output_text.py)、[text配置](https://raw.githubusercontent.com/openai/openai-python/main/src/openai/types/responses/response_text_config_param.py)、[请求参数](https://raw.githubusercontent.com/openai/openai-python/main/src/openai/types/responses/response_create_params.py) |
+| Anthropic必需 `max_tokens`、输入及cache用量 | [请求参数](https://raw.githubusercontent.com/anthropics/anthropic-sdk-python/main/src/anthropic/types/message_create_params.py)、[响应usage说明](https://raw.githubusercontent.com/anthropics/anthropic-sdk-python/main/src/anthropic/types/message.py) |
+| arXiv的Atom错误entry和PDF link，缺失链接不是可推造字段 | [arXiv API手册](https://info.arxiv.org/help/api/user-manual.html) |
+| PDF复杂版面／扫描不能保证提取，已知内容异常须区分 | [pypdf文本提取](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)、[pypdf 6.21.4异常](https://pypdf.readthedocs.io/en/6.21.4/modules/errors.html) |
+| 同步subprocess超时的终止行为、异步路径需显式终止回收 | [Python subprocess.run](https://docs.python.org/3/library/subprocess.html#subprocess.run) |
+| 校验后连接固定IP时保持原TLS服务名与证书校验 | [已安装httpcore 1.0.9连接实现](https://raw.githubusercontent.com/encode/httpcore/1.0.9/httpcore/_async/connection.py) |
+
+实际价格、注册条件、服务可达性与课题检索质量没有重新核验。PDF子进程隔离和时限不是完整内存资源沙箱；复杂表格和大压缩内容仍需受控样本人工评估。

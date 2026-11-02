@@ -1,0 +1,476 @@
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+from backend.app.config import settings
+from backend.app.domain.models import (
+    Evidence,
+    Paper,
+    Report,
+    Run,
+    RunMessage,
+    RunStage,
+    RunStatus,
+    SourceText,
+    SourceType,
+    Task,
+    TaskInput,
+    Event,
+    SearchQuery,
+    utc_now,
+)
+
+
+from contextlib import contextmanager
+from threading import RLock
+
+
+class StateConflict(ValueError):
+    pass
+
+
+class Database:
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            settings.data_dir.mkdir(parents=True, exist_ok=True)
+            self.db_path = str(settings.data_dir / "paperscout.db")
+        else:
+            self.db_path = str(db_path)
+        if self.db_path != ":memory:":
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = RLock()
+        self._depth = 0
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._init_tables()
+
+    @contextmanager
+    def _get_connection(self):
+        # 互斥涵盖整笔事务；嵌套保存检查点和消息时不能提前提交。
+        with self._lock:
+            outer = self._depth == 0
+            if outer:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._depth += 1
+            try:
+                yield self._conn
+            except BaseException:
+                if outer:
+                    self._conn.rollback()
+                raise
+            else:
+                if outer:
+                    self._conn.commit()
+            finally:
+                self._depth -= 1
+
+    def close(self):
+        with self._lock:
+            self._conn.close()
+
+    def _init_tables(self) -> None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    start_year INTEGER,
+                    end_year INTEGER,
+                    focus_dimensions TEXT,
+                    output_requirements TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    initial_topic TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    current_round INTEGER NOT NULL DEFAULT 1,
+                    max_rounds INTEGER NOT NULL DEFAULT 3,
+                    max_calls INTEGER NOT NULL DEFAULT 20,
+                    total_calls INTEGER NOT NULL DEFAULT 0,
+                    total_execution_seconds REAL NOT NULL DEFAULT 0.0,
+                    stop_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    FOREIGN KEY (task_id) REFERENCES tasks (id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_messages (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    impact_summary TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs (id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS papers (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    authors TEXT,
+                    year INTEGER,
+                    doi TEXT,
+                    source TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    pdf_url TEXT,
+                    abstract TEXT,
+                    primary_category TEXT,
+                    categories TEXT,
+                    fetched_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_papers (
+                    run_id TEXT NOT NULL,
+                    paper_id TEXT NOT NULL,
+                    relevance_note TEXT,
+                    is_selected INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (run_id, paper_id),
+                    FOREIGN KEY (run_id) REFERENCES runs (id),
+                    FOREIGN KEY (paper_id) REFERENCES papers (id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS source_texts (
+                    id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_url TEXT,
+                    page_number INTEGER,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    FOREIGN KEY (paper_id) REFERENCES papers (id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS evidence (
+                    id TEXT PRIMARY KEY,
+                    source_text_id TEXT NOT NULL,
+                    paper_id TEXT NOT NULL,
+                    page_number INTEGER,
+                    quote TEXT NOT NULL,
+                    location_start INTEGER,
+                    location_end INTEGER,
+                    FOREIGN KEY (source_text_id) REFERENCES source_texts (id),
+                    FOREIGN KEY (paper_id) REFERENCES papers (id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reports (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content_markdown TEXT NOT NULL,
+                    gaps TEXT,
+                    stop_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs (id)
+                )
+                """
+            )
+            # 已发布的初始骨架缺少运行快照。只对该已知 schema 做一次增量迁移。
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+                conn.execute("ALTER TABLE runs ADD COLUMN details TEXT NOT NULL DEFAULT '{}'")
+                conn.execute("ALTER TABLE run_papers ADD COLUMN snapshot TEXT")
+                conn.execute("PRAGMA user_version = 1")
+            conn.execute("CREATE TABLE IF NOT EXISTS run_sources (run_id TEXT REFERENCES runs(id), source_text_id TEXT REFERENCES source_texts(id), PRIMARY KEY(run_id,source_text_id))")
+            conn.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), data TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS search_queries (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), data TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS assessments (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), data TEXT NOT NULL)")
+
+    # --- Task 操作 ---
+    def create_task(self, task: Task) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks (id, topic, start_year, end_year, focus_dimensions, output_requirements, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.id,
+                    task.topic,
+                    task.start_year,
+                    task.end_year,
+                    json.dumps(task.focus_dimensions, ensure_ascii=False),
+                    task.output_requirements,
+                    task.created_at.isoformat(),
+                    task.updated_at.isoformat(),
+                ),
+            )
+
+    def get_task(self, task_id: str) -> Optional[Task]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if not row:
+                return None
+            return Task(
+                id=row["id"],
+                topic=row["topic"],
+                start_year=row["start_year"],
+                end_year=row["end_year"],
+                focus_dimensions=json.loads(row["focus_dimensions"] or "[]"),
+                output_requirements=row["output_requirements"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+
+    def list_tasks(self, limit: int = 50) -> List[Task]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            return [
+                Task(
+                    id=row["id"],
+                    topic=row["topic"],
+                    start_year=row["start_year"],
+                    end_year=row["end_year"],
+                    focus_dimensions=json.loads(row["focus_dimensions"] or "[]"),
+                    output_requirements=row["output_requirements"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    updated_at=datetime.fromisoformat(row["updated_at"]),
+                )
+                for row in rows
+            ]
+
+    # --- Run 与状态操作（只在短事务内执行，不跨网络请求） ---
+    def create_run(self, run: Run) -> None:
+        with self._get_connection() as conn:
+            active = conn.execute("SELECT id FROM runs WHERE task_id=? AND status IN ('queued','running','pause_requested','paused','needs_input')", (run.task_id,)).fetchone()
+            if active:
+                raise StateConflict("该任务已有活动运行")
+            if run.initial_input is None:
+                task = self.get_task(run.task_id)
+                if task is None:
+                    raise ValueError("任务不存在")
+                run.initial_input = TaskInput.model_validate({k: getattr(task,k) for k in TaskInput.model_fields})
+            if run.current_input is None:
+                run.current_input = run.initial_input.model_copy(deep=True)
+            conn.execute("INSERT INTO runs(id,task_id,initial_topic,status,stage,created_at,details) VALUES(?,?,?,?,?,?,?)", (run.id,run.task_id,run.initial_topic,run.status.value,run.stage.value,run.created_at.isoformat(),run.model_dump_json()))
+            self.update_run(run)
+
+    @staticmethod
+    def _run_from_row(row):
+        data = json.loads(row["details"])
+        # 原始列是控制状态的单一事实来源；details 保存新增字段和检查点。
+        data.update({k: row[k] for k in ("id","task_id","initial_topic","status","stage","current_round","max_rounds","max_calls","total_calls","total_execution_seconds","stop_reason","created_at","started_at","ended_at")})
+        return Run.model_validate(data)
+
+    def get_run(self, run_id: str) -> Optional[Run]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+            return self._run_from_row(row) if row else None
+
+    def list_runs(self, task_id=None, status=None):
+        sql, values = "SELECT * FROM runs", []
+        conditions = []
+        if task_id is not None:
+            conditions.append("task_id=?")
+            values.append(task_id)
+        if status is not None:
+            conditions.append("status=?")
+            values.append(status.value)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        with self._get_connection() as conn:
+            return [self._run_from_row(r) for r in conn.execute(sql + " ORDER BY created_at ASC,id ASC", values)]
+
+    def update_run(self, run: Run) -> None:
+        with self._get_connection() as conn:
+            # API 控制请求可能发生在外部 await 中；旧 worker 快照不能覆盖暂停／取消。
+            row = conn.execute("SELECT status,stop_reason,ended_at FROM runs WHERE id=?", (run.id,)).fetchone()
+            if row is None:
+                raise ValueError("运行不存在")
+            if row["status"] == "cancelled":
+                run.status = RunStatus.CANCELLED
+                run.stop_reason = row["stop_reason"]
+                run.ended_at = datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            elif row["status"] == "pause_requested" and run.status not in (RunStatus.PAUSED,RunStatus.INTERRUPTED,RunStatus.FAILED):
+                run.status = RunStatus.PAUSE_REQUESTED
+            conn.execute("UPDATE runs SET status=?,stage=?,current_round=?,max_rounds=?,max_calls=?,total_calls=?,total_execution_seconds=?,stop_reason=?,started_at=?,ended_at=?,details=? WHERE id=?", (run.status.value,run.stage.value,run.current_round,run.max_rounds,run.max_calls,run.total_calls,run.total_execution_seconds,run.stop_reason,run.started_at.isoformat() if run.started_at else None,run.ended_at.isoformat() if run.ended_at else None,run.model_dump_json(),run.id))
+
+    def pause_run(self, run_id):
+        with self._get_connection():
+            run = self.get_run(run_id)
+            if run is None:
+                raise ValueError("运行不存在")
+            if run.status in (RunStatus.PAUSED, RunStatus.PAUSE_REQUESTED):
+                return run
+            if run.status == RunStatus.QUEUED:
+                return self.transition(run_id,[RunStatus.QUEUED],RunStatus.PAUSED)
+            return self.transition(run_id,[RunStatus.RUNNING],RunStatus.PAUSE_REQUESTED)
+
+    def cancel_run(self, run_id):
+        with self._get_connection() as conn:
+            run = self.get_run(run_id)
+            if run is None:
+                raise ValueError("运行不存在")
+            if run.status == RunStatus.CANCELLED:
+                return run
+            self.transition(run_id,[RunStatus.QUEUED,RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED,RunStatus.PAUSED,RunStatus.NEEDS_INPUT],RunStatus.CANCELLED)
+            conn.execute("UPDATE runs SET stop_reason='用户取消',ended_at=? WHERE id=?", (utc_now().isoformat(),run_id))
+            return self.get_run(run_id)
+
+    def add_message_if_paused(self, msg):
+        with self._get_connection():
+            run = self.get_run(msg.run_id)
+            if run is None or run.status not in (RunStatus.PAUSED,RunStatus.NEEDS_INPUT):
+                raise StateConflict("只能在暂停或等待补充时添加信息")
+            self.save_run_message(msg)
+
+    def transition(self, run_id, expected, target):
+        with self._get_connection() as conn:
+            placeholders = ",".join("?" for _ in expected)
+            changed = conn.execute(f"UPDATE runs SET status=? WHERE id=? AND status IN ({placeholders})", [target.value,run_id,*[s.value for s in expected]]).rowcount
+            if not changed:
+                raise StateConflict("当前运行状态不允许此操作")
+            return self.get_run(run_id)
+
+    def interrupt_running(self):
+        with self._get_connection() as conn:
+            conn.execute("UPDATE runs SET status='interrupted',stop_reason='执行进程中断；不会自动重复外部调用',ended_at=? WHERE status IN ('running','pause_requested')", (utc_now().isoformat(),))
+
+    def save_run_message(self, msg: RunMessage) -> None:
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO run_messages VALUES(?,?,?,?,?,?)", (msg.id,msg.run_id,msg.content,msg.status,msg.impact_summary,msg.created_at.isoformat()))
+
+    def list_run_messages(self, run_id: str) -> List[RunMessage]:
+        with self._get_connection() as conn:
+            return [RunMessage.model_validate(dict(r)) for r in conn.execute("SELECT * FROM run_messages WHERE run_id=? ORDER BY created_at,id", (run_id,))]
+
+    def apply_plan(self, run, messages, keep_paper_ids=None):
+        with self._get_connection() as conn:
+            if keep_paper_ids is not None:
+                self.select_papers(run.id,keep_paper_ids)
+            self.update_run(run)
+            for msg in messages:
+                conn.execute("UPDATE run_messages SET status='processed',impact_summary=? WHERE id=?", ("已重新规划并重新确定历史文献的纳入范围",msg.id))
+
+    def save_papers(self, papers: List[Paper], run_id: Optional[str] = None) -> None:
+        with self._get_connection() as conn:
+            for p in papers:
+                # 首次元数据不被下一次检索覆盖；各运行另外保存取得的独立快照。
+                conn.execute("INSERT OR IGNORE INTO papers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (p.id,p.title,json.dumps(p.authors),p.year,p.doi,p.source,p.source_id,p.url,p.pdf_url,p.abstract,p.primary_category,json.dumps(p.categories),p.fetched_at.isoformat()))
+                if run_id:
+                    conn.execute("INSERT OR IGNORE INTO run_papers(run_id,paper_id,is_selected,snapshot) VALUES(?,?,1,?)", (run_id,p.id,p.model_dump_json()))
+
+    def get_papers_by_run(self, run_id: str, selected_only=False) -> List[Paper]:
+        with self._get_connection() as conn:
+            sql = "SELECT p.*,rp.snapshot FROM papers p JOIN run_papers rp ON p.id=rp.paper_id WHERE rp.run_id=?"
+            if selected_only:
+                sql += " AND rp.is_selected=1"
+            result = []
+            for r in conn.execute(sql + " ORDER BY p.id", (run_id,)):
+                if r["snapshot"] is not None:
+                    result.append(Paper.model_validate_json(r["snapshot"]))
+                else:
+                    d = dict(r)
+                    d.pop("snapshot")
+                    d["authors"], d["categories"] = json.loads(d["authors"] or "[]"), json.loads(d["categories"] or "[]")
+                    result.append(Paper.model_validate(d))
+            return result
+
+    def select_papers(self, run_id, paper_ids):
+        with self._get_connection() as conn:
+            conn.execute("UPDATE run_papers SET is_selected=0 WHERE run_id=?", (run_id,))
+            for paper_id in paper_ids:
+                if conn.execute("UPDATE run_papers SET is_selected=1 WHERE run_id=? AND paper_id=?", (run_id,paper_id)).rowcount != 1:
+                    raise ValueError("计划引用了未知论文")
+
+    def save_source_texts(self, texts: List[SourceText], run_id=None) -> None:
+        with self._get_connection() as conn:
+            for t in texts:
+                # 快照一旦被引用，不能原地替换。
+                conn.execute("INSERT INTO source_texts VALUES(?,?,?,?,?,?,?,?)", (t.id,t.paper_id,t.source_type.value,t.source_url,t.page_number,t.content,t.status,t.fetched_at.isoformat()))
+                if run_id:
+                    conn.execute("INSERT INTO run_sources VALUES(?,?)", (run_id,t.id))
+
+    def get_source_texts(self, paper_id: str, run_id=None) -> List[SourceText]:
+        with self._get_connection() as conn:
+            sql, args = "SELECT s.* FROM source_texts s", []
+            if run_id is not None:
+                sql += " JOIN run_sources rs ON rs.source_text_id=s.id AND rs.run_id=?"
+                args.append(run_id)
+            sql += " WHERE s.paper_id=? ORDER BY s.fetched_at,s.page_number,s.id"
+            args.append(paper_id)
+            return [SourceText.model_validate(dict(r)) for r in conn.execute(sql, args)]
+
+    def save_evidence(self, ev_list: List[Evidence]) -> None:
+        with self._get_connection() as conn:
+            for ev in ev_list:
+                s = conn.execute("SELECT * FROM source_texts WHERE id=?", (ev.source_text_id,)).fetchone()
+                start, end = ev.location_start, ev.location_end
+                if s is None or s["status"] != "ok" or s["paper_id"] != ev.paper_id or s["page_number"] != ev.page_number or start is None or end is None or not (0 <= start < end <= len(s["content"])) or s["content"][start:end] != ev.quote:
+                    raise ValueError("证据与实际读取的快照或定位不匹配")
+                conn.execute("INSERT INTO evidence VALUES(?,?,?,?,?,?,?)", (ev.id,ev.source_text_id,ev.paper_id,ev.page_number,ev.quote,start,end))
+
+    def get_evidence(self, paper_id, run_id=None):
+        with self._get_connection() as conn:
+            sql, args = "SELECT e.* FROM evidence e", []
+            if run_id is not None:
+                sql += " JOIN run_sources rs ON rs.source_text_id=e.source_text_id AND rs.run_id=?"
+                args.append(run_id)
+            sql += " WHERE e.paper_id=? ORDER BY e.id"
+            args.append(paper_id)
+            return [Evidence.model_validate(dict(r)) for r in conn.execute(sql,args)]
+
+    def save_report(self, report: Report) -> None:
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO reports VALUES(?,?,?,?,?,?,?)", (report.id,report.run_id,report.title,report.content_markdown,json.dumps(report.gaps,ensure_ascii=False),report.stop_reason,report.created_at.isoformat()))
+
+    def get_report(self, run_id: str) -> Optional[Report]:
+        with self._get_connection() as conn:
+            r = conn.execute("SELECT * FROM reports WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+            if r is None:
+                return None
+            data = dict(r)
+            data["gaps"] = json.loads(data["gaps"] or "[]")
+            return Report.model_validate(data)
+
+    def save_event(self, event):
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO events VALUES(?,?,?)", (event.id,event.run_id,event.model_dump_json()))
+
+    def list_events(self, run_id):
+        with self._get_connection() as conn:
+            return [Event.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM events WHERE run_id=? ORDER BY rowid", (run_id,))]
+
+    def save_query(self, query):
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO search_queries VALUES(?,?,?)", (query.id,query.run_id,query.model_dump_json()))
+
+    def list_queries(self, run_id):
+        with self._get_connection() as conn:
+            return [SearchQuery.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM search_queries WHERE run_id=? ORDER BY rowid", (run_id,))]
+
+    def save_assessment(self, assessment):
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO assessments VALUES(?,?,?)", (assessment.id,assessment.run_id,assessment.model_dump_json()))

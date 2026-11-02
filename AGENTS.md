@@ -1,6 +1,6 @@
 # 项目协作规范
 
-适用范围：整个 Paper Scout 仓库。先阅读本文件、README 和本次修改涉及的开发文档；已有用户明确指令优先。当前处于设计阶段，不得把计划功能、拟定接口或未运行命令描述成已有能力。
+适用范围：整个 Paper Scout 仓库。先阅读本文件、README 和本次修改涉及的开发文档；已有用户明确指令优先。当前已有工程原型和离线定向测试，尚未实现完整科研语义分析；不得把计划功能、拟定接口或未运行命令描述成已有能力。
 
 ## 1. 工作目标与范围
 
@@ -76,4 +76,11 @@
 4. 汇报实际修改、验证结果及仍未确定的事项。区分已运行、仅静态检查、未验证；不声称“全部通过”来概括未执行的检查。
 5. 需求或已确认方案改变时同步修改受影响文档，并在决策记录注明依据。检查后无新变化不重复检查。
 
-当前没有可执行代码或测试命令。工程初始化后再补充真实可运行的命令，不预先编造。
+当前真实可执行命令（仓库根目录）：
+
+```bash
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_storage.py tests/test_workflow_engine.py tests/test_api_tasks_and_runs.py tests/test_api_health.py -q
+.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+前端在 `frontend/` 执行 `npm ci`、`npm run build` 和 `npm run dev`。验证范围与实际结果见 [代码审查记录](<docs/08-code-review.md>)；运行与配置细节见 [README](<README.md>)。不能把离线定向测试等同于真实模型、arXiv 网络或浏览器联调验收。

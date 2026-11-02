@@ -1,0 +1,17 @@
+# Web API
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+
+# HTTP 客户端 (支持异步与流式请求，用于模型调用及 arXiv 检索)
+httpx>=0.27.0
+
+# 环境与配置
+python-dotenv>=1.0.1
+
+# 文献解析 (按页提取 PDF 文本)
+pypdf>=4.3.0
+
+# 测试
+pytest>=8.3.0

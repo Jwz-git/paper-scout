@@ -6,7 +6,7 @@ Thumbs.db
 *.swo
 *~
 
-# 本地配置与凭据；配置样例应提交
+# 本地配置与凭据；仅配置样例进入版本管理
 .env
 .env.*
 !.env.example
@@ -42,15 +42,21 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# 项目运行数据：数据库、论文、模型响应和生成报告
-# 只忽略约定的运行目录，保留 docs 与 tests/fixtures 中的示例
+# TypeScript 生成的 Vite 配置；保留 vite.config.ts 源文件
+/frontend/vite.config.js
+/frontend/vite.config.d.ts
+
+# 项目运行数据：数据库、论文、模型响应、日志和生成报告
+# 只忽略约定目录，不全局忽略 PDF／Office 文件或测试样例
 /data/
 /reports/
 /logs/
+/temp/
 .cache/
 *.log
 
 # 本地 Claude 入口，协作规范以 AGENTS.md 为准
 /CLAUDE.md
 
-# 依赖锁文件、.python-version、文档、测试样本及共享编辑器配置应提交
+# 保留依赖锁文件、.python-version、docs、tests/fixtures 和共享编辑器配置
+# 忽略规则不会自动移除已跟踪文件；提交前仍需核对暂存范围
