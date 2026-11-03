@@ -4,9 +4,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 
 from backend.app.api.routes import router
 from backend.app.config import Settings
+from backend.app.model_settings import ModelSettingsService
 from backend.app.storage.database import Database
 from backend.app.workflow.engine import WorkflowEngine
 from backend.app.workflow.worker import SerialWorker
@@ -21,14 +24,10 @@ def create_app(config=None, db=None, engine=None, run_worker=True):
         store = db if db is not None else Database(cfg.data_dir / "paperscout.db")
         own_store = db is None
         app.state.db = store
+        app.state.model_settings = ModelSettingsService(cfg)
         if engine is None:
             from backend.app.adapters.arxiv import ArXivAdapter
-            from backend.app.adapters.llm import create_llm_adapter
-            llm = None
-            if cfg.llm_base_url or cfg.llm_model or cfg.llm_api_key.get_secret_value():
-                if not cfg.llm_base_url or not cfg.llm_model:
-                    raise ValueError("配置缺少 LLM_BASE_URL 或 LLM_MODEL")
-                llm = create_llm_adapter(cfg.llm_protocol,cfg.llm_base_url,cfg.llm_model,cfg.llm_api_key.get_secret_value())
+            llm = app.state.model_settings.adapter()
             runner = WorkflowEngine(store, arxiv_adapter=ArXivAdapter(user_agent=cfg.arxiv_user_agent,rate_limit_seconds=cfg.arxiv_rate_limit_seconds),llm_adapter=llm)
         else:
             runner = engine
@@ -48,6 +47,14 @@ def create_app(config=None, db=None, engine=None, run_worker=True):
                 store.close()
 
     app = FastAPI(title="Paper Scout", version="0.1.0", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def redact_settings_validation(request, exc):
+        if request.url.path == "/api/settings" or request.url.path.startswith("/api/settings/"):
+            # 默认 422 会包含 input；设置请求里的密钥不能随错误响应回显。
+            errors = [{"loc": error["loc"], "msg": error["msg"], "type": error["type"]} for error in exc.errors()]
+            return JSONResponse({"detail": errors}, status_code=422, headers={"Cache-Control": "no-store"})
+        return await request_validation_exception_handler(request, exc)
     app.add_middleware(TrustedHostMiddleware,allowed_hosts=["127.0.0.1","localhost","testserver"])
     app.add_middleware(CORSMiddleware,allow_origins=sorted(LOCAL_ORIGINS),allow_credentials=False,allow_methods=["GET","POST"],allow_headers=["Content-Type"])
 
@@ -60,8 +67,9 @@ def create_app(config=None, db=None, engine=None, run_worker=True):
         return await call_next(request)
 
     @app.get("/api/health",tags=["system"])
-    async def health():
-        return {"status":"ok","app":"Paper Scout","version":"0.1.0"}
+    async def health(request: Request):
+        return {"status":"ok","app":"Paper Scout","version":"0.1.0",
+                "model_configured": request.app.state.dialogue.llm is not None}
 
     app.include_router(router)
     return app
