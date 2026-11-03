@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
@@ -25,7 +25,9 @@ class RunStage(str, Enum):
     UNDERSTANDING = "understanding"
     PLANNING = "planning"
     SEARCHING = "searching"
+    SCREENING = "screening"
     EXTRACTING = "extracting"
+    ANALYZING = "analyzing"
     ASSESSING = "assessing"
     SYNTHESIZING = "synthesizing"
     REPORTING = "reporting"
@@ -100,6 +102,19 @@ class Run(BaseModel):
     subproblems: List[str] = Field(default_factory=list)
     query_index: int = 0
     pdf_index: int = 0
+    analysis_index: int = 0
+    analysis_revision: int = 1
+    scope_history: Dict[int, TaskInput] = Field(default_factory=dict)
+    query_targets: Dict[str, List[str]] = Field(default_factory=dict)
+    max_papers: int = 12
+    min_papers: int = 6
+    min_per_subproblem: int = 2
+    min_field_completeness: float = 0.6
+    assessment_rule: str = "coverage-v1"
+    last_progress: List[int] = Field(default_factory=list)
+    sufficient: bool = False
+    pending_sections: List[dict] = Field(default_factory=list)
+    synthesis_truncated: bool = False
     pdf_attempted: List[str] = Field(default_factory=list)
     no_new_rounds: int = 0
     papers_before_round: int = 0
@@ -153,6 +168,8 @@ class SearchQuery(BaseModel):
     round_number: int
     query_text: str
     raw_query: Optional[str] = None
+    subproblems: List[str] = Field(default_factory=list)
+    analysis_revision: int = 1
     source: str = "arxiv"
     total_results: int = 0
     error_category: Optional[str] = None
@@ -189,6 +206,77 @@ class Extraction(BaseModel):
     evidence_ids: List[str] = Field(default_factory=list)
     missing_reason: Optional[MissingReason] = None
     is_inference: bool = False
+    origin: Literal["author", "inference", "user"] = "author"
+    note: str = ""
+
+
+class ReadRange(BaseModel):
+    source_text_id: str
+    source_type: SourceType
+    page_number: Optional[int] = None
+    location_start: int
+    location_end: int
+    original_length: int
+
+
+class ReportSource(ReadRange):
+    paper_id: str
+    status: str
+    source_url: Optional[str] = None
+
+
+class PaperSelection(BaseModel):
+    paper_id: str
+    analysis_revision: int
+    relevant: bool
+    reason: str
+    subproblems: List[str] = Field(default_factory=list)
+    evidence_ids: List[str] = Field(default_factory=list)
+    reviewed: bool = True
+
+
+class Experiment(BaseModel):
+    id: str
+    paper_id: str
+    dataset: Optional[str] = None
+    dataset_version: Optional[str] = None
+    split: Optional[str] = None
+    metric: Optional[str] = None
+    value: Optional[str] = None
+    unit: Optional[str] = None
+    direction: Optional[Literal["higher", "lower"]] = None
+    protocol: Optional[str] = None
+    compute: Optional[str] = None
+    evidence_ids: List[str] = Field(default_factory=list)
+
+
+class PaperAnalysis(BaseModel):
+    id: str
+    run_id: str
+    paper_id: str
+    analysis_revision: int
+    round_number: int
+    status: Literal["completed", "failed", "unavailable"]
+    focus_dimensions: List[str] = Field(default_factory=list)
+    ranges: List[ReadRange] = Field(default_factory=list)
+    fields: List[Extraction] = Field(default_factory=list)
+    experiments: List[Experiment] = Field(default_factory=list)
+    reused_from: Optional[str] = None
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class Comparison(BaseModel):
+    left_paper_id: str
+    right_paper_id: str
+    left_experiment_id: str
+    right_experiment_id: str
+    status: Literal["comparable", "not_comparable", "insufficient"]
+    reasons: List[str]
+    evidence_ids: List[str]
+    metric: Optional[str] = None
+    left_value: Optional[str] = None
+    right_value: Optional[str] = None
 
 
 class Assessment(BaseModel):
@@ -199,6 +287,45 @@ class Assessment(BaseModel):
     field_completeness: Dict[str, float] = Field(default_factory=dict)
     gaps: List[str] = Field(default_factory=list)
     decision: str = "continue"
+    analysis_revision: int = 1
+    rule: str = "coverage-v1"
+    supporting_papers: Dict[str, List[str]] = Field(default_factory=dict)
+    field_counts: Dict[str, List[int]] = Field(default_factory=dict)
+    paper_groups: Dict[str, str] = Field(default_factory=dict)
+    duplicate_candidates: List[List[str]] = Field(default_factory=list)
+    comparisons: List[Comparison] = Field(default_factory=list)
+    next_actions: List[str] = Field(default_factory=list)
+    sufficient: bool = False
+
+
+class ReportClaim(BaseModel):
+    text: str
+    evidence_ids: List[str]
+    origin: Literal["author", "inference", "user"] = "inference"
+
+
+class ReportSection(BaseModel):
+    title: str
+    claims: List[ReportClaim]
+
+
+class ReportDocument(BaseModel):
+    analysis_revision: int
+    scope: TaskInput
+    papers: List[Paper]
+    queries: List[SearchQuery]
+    selections: List[PaperSelection]
+    analyses: List[PaperAnalysis]
+    assessment: Optional[Assessment] = None
+    sections: List[ReportSection] = Field(default_factory=list)
+    evidence: List[Evidence]
+    sources: List[ReportSource]
+    total_calls: int
+    model_calls: int
+    token_usage: Dict[str, Optional[int]]
+    semantic_review: str = "未进行人工语义复核；定位校验不证明主张成立"
+    execution_seconds: float = 0.0
+    limits: Dict[str, float] = Field(default_factory=dict)
 
 
 class Report(BaseModel):
@@ -206,6 +333,7 @@ class Report(BaseModel):
     run_id: str
     title: str
     content_markdown: str
+    document: Optional[ReportDocument] = None
     gaps: List[str] = Field(default_factory=list)
     stop_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)

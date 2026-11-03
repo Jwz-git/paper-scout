@@ -33,6 +33,49 @@ const themeOnly = process.env.BROWSER_SCENARIO === 'theme';
 const preferencesOnly = process.env.BROWSER_SCENARIO === 'preferences';
 const trashOnly = process.env.BROWSER_SCENARIO === 'trash';
 const usageOnly = process.env.BROWSER_SCENARIO === 'usage';
+const analysisOnly = process.env.BROWSER_SCENARIO === 'analysis';
+const chatOnly = process.env.BROWSER_SCENARIO === 'chat';
+let holdChatMaterials = false, holdChatEvents = false;
+let releaseChatMaterials, signalChatMaterials, releaseChatEvents, signalChatEvents;
+const chatMaterialsStarted = new Promise(resolve => { signalChatMaterials = resolve; });
+const chatMaterialsReleased = new Promise(resolve => { releaseChatMaterials = resolve; });
+const chatEventsStarted = new Promise(resolve => { signalChatEvents = resolve; });
+const chatEventsReleased = new Promise(resolve => { releaseChatEvents = resolve; });
+const externalRequests = [];
+if (chatOnly) {
+  viewA.messages = [
+    message('a-user', taskA.id, 'user', '帮我梳理多智能体通信的研究方向，区分已有证据和待验证问题。'),
+    message('a-answer', taskA.id, 'assistant', [
+      '下面是**人工界面样例**，用于检查排版和交互，不是真实研究结果。',
+      '## 研究范围',
+      '可以从三个相互关联的问题入手：',
+      '1. **什么时候通信**：记录触发条件与通信频率。\n2. **传递哪些信息**：区分原始观测、压缩表示和任务信息。\n3. **如何评价效果**：同时记录任务表现、通信开销和实验条件。',
+      '## 文献比较',
+      '| 方向 | 应提取的依据 | 当前状态 |\n| --- | --- | --- |\n| 通信机制 | 方法与限制 | 需要原文 |\n| 评价协议 | 数据集与指标 | 尚未核验 |',
+      '> 条件不同的实验不能直接排名；引用定位有效也不等于语义已经核验。',
+      '```python\n# Artificial display example\nprint("evidence before conclusions")\n```',
+      '[公开来源](https://arxiv.org/)\n\n<img src="https://invalid.example/raw-image" onerror="window.__markdownExecuted=true">\n\n[不安全链接](javascript:alert(1))\n\n![不自动下载图片](https://invalid.example/tracker.png)',
+      ...Array.from({ length: 8 }, (_, index) => `### 待核查方向 ${index + 1}\n这里只展示人工长文本，检查滚动阅读时后台刷新是否改变当前位置。实际结论需要逐条关联已保存的来源，缺失字段必须明确标记。`),
+    ].join('\n\n'), { run_id: run.id, citations: [citation] }),
+  ];
+}
+
+const reportDownloads = [];
+let holdAnalysis = false;
+let releaseAnalysis, signalAnalysis;
+const analysisStarted = new Promise(resolve => { signalAnalysis = resolve; });
+const analysisReleased = new Promise(resolve => { releaseAnalysis = resolve; });
+const evidence = { id: 'field-evidence', ...citation };
+const analysis = { id: 'analysis-one', paper_id: paper.id, analysis_revision: 2, status: 'completed', error: null, reused_from: null,
+  fields: [{ id: 'field-one', field_name: 'method', value: '人工方法描述', missing_reason: null, evidence_ids: [evidence.id], origin: 'author', note: '只用于界面验证' },
+    { id: 'field-missing', field_name: 'datasets', value: null, missing_reason: 'not_found', evidence_ids: [], origin: 'author', note: '' }],
+  ranges: [{ ...citation, original_length: Array.from(source.content).length }] };
+const selection = { paper_id: paper.id, relevant: true, reviewed: true, reason: '人工筛选依据', subproblems: ['通信'], evidence_ids: [evidence.id] };
+const researchAnalysis = { analysis_revision: 2, papers: [paper], analyses: [analysis], selections: [selection], assessment: {
+  sufficient: false, rule: 'coverage-v1', supporting_papers: { '通信': ['paper-group'] }, field_counts: { [paper.id]: [1, 6] }, paper_groups: { [paper.id]: 'paper-group' }, duplicate_candidates: [], gaps: ['人工缺口：数据集尚未找到'], next_actions: ['针对数据集补读'],
+  comparisons: [{ left_paper_id: paper.id, right_paper_id: 'other-paper', status: 'not_comparable', metric: 'accuracy', left_value: '80', right_value: '90', reasons: ['评价协议不一致'], evidence_ids: [evidence.id] }] } };
+const researchReport = { id: 'pinned-report', run_id: run.id, title: '人工结构化报告', content_markdown: '# 人工结构化报告\n并非真实研究结果。', gaps: ['人工缺口'], stop_reason: '人工执行上限', document: { analysis_revision: 2, semantic_review: '语义支持尚未人工核验', evidence: [evidence], sections: [{ title: '综合结论', claims: [{ text: '人工主张用于验证引用跳转', origin: 'inference', evidence_ids: [evidence.id] }] }] } };
+if (analysisOnly) viewA = { ...viewA, runs: [{ ...run, status: 'partial', analysis_revision: 2, stage: 'reporting' }] };
 const catalogOnly = process.env.BROWSER_SCENARIO === 'catalog';
 const catalogPosts = [];
 let rejectCatalog = false;
@@ -68,6 +111,9 @@ function updateActiveModel() {
   Object.assign(modelSettings, { protocol: active?.protocol || 'openai_chat', base_url: active?.base_url || '', model: modelSettings.active_model || '', api_key_set: active?.api_key_set || false });
 }
 const selectionPosts = [];
+if (chatOnly) {
+  modelSettings = { ...modelSettings, enabled: true, model: 'research-model', active_model: 'research-model', active_provider_id: 'fixture-provider', providers: [{ id: 'fixture-provider', name: '人工供应商', models: ['research-model'], protocol: 'openai_chat', base_url: 'https://invalid.example', api_key_set: false }] };
+}
 
 const taskC = task('offline-create', '离线首轮对话示例');
 let viewC = null;
@@ -90,7 +136,7 @@ page.setDefaultTimeout(8000);
 page.on('pageerror', error => errors.push(error.message));
 await context.route('**/*', async route => {
   const url = new URL(route.request().url());
-  if (url.origin !== 'http://127.0.0.1:5173') return route.abort();
+  if (url.origin !== 'http://127.0.0.1:5173') { externalRequests.push(url.href); return route.abort(); }
   const json = value => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(value) });
   if (url.pathname === '/api/settings') return json(modelSettings);
   if (url.pathname === '/api/settings/selection') {
@@ -197,9 +243,21 @@ await context.route('**/*', async route => {
     }
     return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(viewA) });
   }
-  if (url.pathname === `/api/runs/${run.id}/events`) return json([{ id: 'event-1', run_id: run.id, stage: 'searching', category: 'search', message: '人工检索过程记录', created_at: now }]);
-  if (url.pathname === `/api/runs/${run.id}/papers`) return json([paper]);
-  if (url.pathname === `/api/runs/${run.id}/papers/${paper.id}`) return json({ paper, sources: [source], evidence: [] });
+  if (url.pathname === `/api/runs/${run.id}/events`) {
+    if (holdChatEvents) { signalChatEvents(); await chatEventsReleased; }
+    return json([{ id: 'event-1', run_id: run.id, stage: 'searching', category: 'search', message: '人工检索过程记录', created_at: now }]);
+  }
+  if (url.pathname === `/api/runs/${run.id}/papers`) {
+    if (holdChatMaterials) { signalChatMaterials(); await chatMaterialsReleased; }
+    return json([paper]);
+  }
+  if (analysisOnly && url.pathname === `/api/runs/${run.id}/analysis`) { if (holdAnalysis) { signalAnalysis(); await analysisReleased; } return json(researchAnalysis); }
+  if (analysisOnly && /\/report\.(md|docx|pdf)$/.test(url.pathname)) {
+    reportDownloads.push({ id: url.searchParams.get('report_id'), format: url.pathname.split('.').at(-1) });
+    return route.fulfill({ contentType: 'application/octet-stream', body: 'Artificial export fixture, not a research document.' });
+  }
+  if (url.pathname === `/api/runs/${run.id}/papers/${paper.id}`) return json({ paper, sources: [source], evidence: analysisOnly ? [evidence] : [], ...(analysisOnly ? { analysis, selection, selected: true } : {}) });
+  if (analysisOnly && url.pathname === `/api/runs/${run.id}/report`) return json(researchReport);
   if (url.pathname === `/api/runs/${run.id}/report`) return json({ id: 'offline-report', run_id: run.id, title: '人工阶段性报告', content_markdown: '# 人工离线报告\n\n非真实研究结果。', gaps: ['人工样例，不用于科研结论。'], stop_reason: '离线界面验证' });
   if (url.pathname === `/api/runs/${run.id}/report.md`) return route.fulfill({ contentType: 'text/markdown', body: '# 人工离线报告\n非真实研究结果。' });
   if (url.pathname.startsWith('/api/')) throw new Error(`Unexpected mocked API: ${url.pathname}`);
@@ -231,7 +289,151 @@ try {
   await page.screenshot({ path: path.join(output, 'conversation-empty.png'), fullPage: true });
   console.log('PASS empty conversational workspace; no prefilled fake task/stepper');
 
-  if (catalogOnly || settingsOnly) {
+  if (chatOnly) {
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: path.join(output, 'codex-chat-empty.png'), fullPage: true });
+    const initialOrder = await page.locator('.history-title').allTextContents();
+    await page.getByRole('button', { name: /离线示例B/ }).click();
+    await page.getByText('人工会话B的原始问题', { exact: true }).waitFor();
+    assert.deepEqual(await page.locator('.history-title').allTextContents(), initialOrder);
+    await page.getByRole('button', { name: /离线示例A/ }).click();
+    await page.locator('.message-markdown h2').first().waitFor();
+    const markdown = page.locator('.message-markdown');
+    assert.equal(await markdown.locator('table').count(), 1);
+    assert.equal(await markdown.locator('pre code').count(), 1);
+    assert.equal(await markdown.locator('img, script, iframe').count(), 0);
+    assert.equal(await markdown.locator('a[href^="javascript:"]').count(), 0);
+    assert.equal(await page.evaluate(() => window.__markdownExecuted), undefined);
+    const link = markdown.getByRole('link', { name: '公开来源', exact: true });
+    assert.equal(await link.getAttribute('target'), '_blank');
+    assert.equal(await link.getAttribute('rel'), 'noopener noreferrer');
+    assert.deepEqual(externalRequests, []);
+    console.log('PASS Markdown headings/table/code; no raw HTML, dangerous link, or automatic image request');
+
+    const scroll = page.locator('.timeline-scroll');
+    await scroll.evaluate(element => { element.scrollTop = 0; });
+    await page.screenshot({ path: path.join(output, 'codex-chat-desktop.png'), fullPage: true });
+    await composer.fill('保留这段未发送的草稿');
+    await page.getByRole('button', { name: '关闭对话列表', exact: true }).click();
+    assert.equal(await page.locator('.sidebar').isVisible(), false);
+    assert.equal(await page.getByRole('button', { name: '打开对话列表', exact: true }).evaluate(element => element === document.activeElement), true);
+    await page.getByRole('button', { name: '打开对话列表', exact: true }).click();
+    assert.equal(await page.locator('.sidebar').isVisible(), true);
+    assert.equal(await page.locator('.sidebar-close').evaluate(element => element === document.activeElement), true);
+    assert.equal(await composer.inputValue(), '保留这段未发送的草稿');
+    await composer.fill('');
+    await page.locator('.process-records > summary').click();
+    await page.getByText('人工检索过程记录', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '查看资料与报告', exact: true }).click();
+    await page.locator('.paper-row').waitFor();
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    const measure = () => page.evaluate(() => {
+      const timeline = document.querySelector('.timeline-scroll');
+      return { scrollHeight: timeline.scrollHeight, scrollTop: timeline.scrollTop,
+        composerY: document.querySelector('.composer').getBoundingClientRect().y,
+        paperY: document.querySelector('.paper-row').getBoundingClientRect().y,
+        processHeight: document.querySelector('.process-content').getBoundingClientRect().height };
+    });
+    const baseline = await measure();
+    holdChatMaterials = true; holdChatEvents = true;
+    await chatMaterialsStarted;
+    assert.deepEqual(await measure(), baseline, 'background material refresh must not insert a loading paragraph');
+    assert.equal(await page.getByText('正在读取本次资料…', { exact: true }).count(), 0);
+    holdChatMaterials = false; releaseChatMaterials();
+    await chatEventsStarted;
+    assert.deepEqual(await measure(), baseline, 'background event refresh must not shift the timeline or composer');
+    assert.equal(await page.getByText('正在读取过程记录…', { exact: true }).count(), 0);
+    holdChatEvents = false; releaseChatEvents();
+    await page.getByRole('button', { name: '关闭资料面板', exact: true }).click();
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    await scroll.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 50; });
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    const beforePoll = await scroll.evaluate(element => element.scrollTop);
+    const selectionText = await page.evaluate(() => {
+      const text = document.querySelector('.message-markdown p');
+      const selection = window.getSelection();
+      selection.selectAllChildren(text);
+      return selection.toString();
+    });
+    await page.waitForResponse(response => new URL(response.url()).pathname === `/api/conversations/${taskA.id}`);
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    assert.ok(Math.abs(await scroll.evaluate(element => element.scrollTop) - beforePoll) < 2, 'unchanged polling must not snap a reader to the bottom');
+    assert.equal(await page.evaluate(() => window.getSelection().toString()), selectionText);
+    viewA = { ...viewA, messages: [...viewA.messages, message('follow-new', taskA.id, 'assistant', '新内容会跟随到底部。\n\n这是新增的人工消息。')] };
+    await page.getByText('新内容会跟随到底部。', { exact: true }).waitFor();
+    await page.waitForFunction(() => { const element = document.querySelector('.timeline-scroll'); return element.scrollHeight - element.scrollTop - element.clientHeight < 3; });
+    await scroll.evaluate(element => { element.scrollTop = 0; });
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    viewA = { ...viewA, messages: [...viewA.messages, message('stay-up', taskA.id, 'assistant', '新增消息不会打断向上阅读。')] };
+    await page.getByText('新增消息不会打断向上阅读。', { exact: true }).waitFor();
+    assert.ok(await scroll.evaluate(element => element.scrollTop < 2));
+    console.log('PASS stable sidebar order, delayed background refresh, preserved text selection, follow and stay-up scrolling');
+
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.screenshot({ path: path.join(output, 'codex-chat-dark.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await composer.fill('移动端保留的草稿');
+    await page.screenshot({ path: path.join(output, 'codex-chat-mobile.png'), fullPage: true });
+    await page.setViewportSize({ width: 320, height: 800 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(await page.locator('.composer').evaluate(element => element.scrollWidth <= element.clientWidth), true);
+    await page.getByLabel('选择当前模型', { exact: true }).click();
+    const modelBox = await page.locator('.model-menu-options').boundingBox();
+    assert.ok(modelBox.x >= 0 && modelBox.x + modelBox.width <= 320);
+    await page.keyboard.press('Escape');
+    await page.getByLabel('选择消息意图', { exact: true }).click();
+    const modeBox = await page.locator('.intent-options').boundingBox();
+    assert.ok(modeBox.x >= 0 && modeBox.x + modeBox.width <= 320);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: '打开对话列表', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Paper Scout', exact: true }).getByRole('button', { name: '关闭对话列表', exact: true }).waitFor({ state: 'visible' });
+    await page.keyboard.press('Escape');
+    assert.equal(await composer.inputValue(), '移动端保留的草稿');
+    assert.deepEqual(errors, []);
+    console.log('PASS desktop sidebar collapse, dark/mobile layouts, narrow-screen menus and preserved draft');
+  } else if (analysisOnly) {
+    await page.getByRole('button', { name: /离线示例A/ }).click();
+    await page.getByRole('button', { name: /引用 1/ }).click();
+    await page.getByRole('heading', { name: '字段与证据', exact: true }).waitFor();
+    await page.getByText('提供的片段中未找到', { exact: true }).waitFor();
+    await page.locator('.field-evidence').click();
+    assert.equal(await page.locator('mark').innerText(), quote);
+    await page.getByRole('button', { name: '分析与比较', exact: true }).click();
+    await page.getByText('不可直接比较', { exact: true }).waitFor();
+    await page.getByText('评价协议不一致', { exact: true }).waitFor();
+    assert.match(await page.locator('.research-analysis').innerText(), /不是准确率评分/);
+    await page.screenshot({ path: path.join(output, 'research-analysis-desktop.png'), fullPage: true });
+    await page.getByRole('button', { name: '研究报告', exact: true }).click();
+    await page.getByText('人工主张用于验证引用跳转', { exact: false }).waitFor();
+    for (const [button, format] of [['下载 .md','md'], ['Word','docx'], ['PDF','pdf']]) {
+      const nextDownload = page.waitForEvent('download');
+      await page.getByRole('button', { name: button, exact: true }).click();
+      const download = await nextDownload;
+      assert.equal(download.suggestedFilename(), `paper-scout-pinned-report.${format}`);
+    }
+    assert.deepEqual(reportDownloads, ['md','docx','pdf'].map(format => ({ id:'pinned-report', format })));
+    await page.locator('.report-claims').getByRole('button', { name: '查看依据 1', exact: true }).click();
+    assert.equal(await page.locator('mark').innerText(), quote);
+    await page.getByRole('button', { name: '分析与比较', exact: true }).click();
+    await page.getByText('评价协议不一致', { exact: true }).waitFor();
+    await page.setViewportSize({ width: 320, height: 800 });
+    await page.emulateMedia({ colorScheme: 'dark' });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.screenshot({ path: path.join(output, 'research-analysis-mobile-dark.png'), fullPage: true });
+    await page.getByRole('heading', { name: '实验条件比较', exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(output, 'research-comparison-mobile-dark.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    holdAnalysis = true;
+    await page.getByRole('button', { name: '刷新分析', exact: true }).click();
+    await analysisStarted;
+    await page.getByRole('button', { name: /离线示例B/ }).click();
+    releaseAnalysis();
+    await page.getByText('人工会话B的原始问题', { exact: true }).waitFor();
+    assert.equal(await page.locator('.research-analysis').count(), 0);
+    assert.deepEqual(errors, []);
+    assert.equal(posts.length + settingsPosts.length + selectionPosts.length, 0);
+    console.log('PASS structured fields/missing data, Unicode evidence, comparisons and gap explanations, pinned three-format downloads, 320px dark layout and late-response isolation; no model or mutation requests');
+  } else if (catalogOnly || settingsOnly) {
     await composer.fill('配置AI服务时保留的草稿');
     await openModelSettings();
     await page.getByRole('heading', { name: 'AI服务', exact: true }).waitFor();
@@ -870,6 +1072,9 @@ try {
   await page.screenshot({ path: path.join(output, 'conversation-failure.png'), fullPage: true });
   throw error;
 } finally {
+  releaseChatMaterials();
+  releaseChatEvents();
+  releaseAnalysis();
   releaseB();
   releaseStalePoll();
   releaseSettingsSave();

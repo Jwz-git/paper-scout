@@ -1,5 +1,5 @@
 <template>
-  <main :inert="settingsOpen" class="workspace" :class="{ 'panel-visible': panelOpen, 'welcome-view': selectedKey === NEW_CHAT }">
+  <main :inert="settingsOpen" class="workspace" :class="{ 'panel-visible': panelOpen, 'welcome-view': selectedKey === NEW_CHAT, 'sidebar-collapsed': !compactLayout && sidebarCollapsed }">
     <button
       v-if="compactLayout && (sidebarOpen || panelOpen)"
       class="mobile-scrim"
@@ -12,7 +12,7 @@
       ref="sidebarElement"
       class="sidebar"
       :class="{ 'mobile-open': sidebarOpen }"
-      :inert="compactLayout && (!sidebarOpen || panelOpen)"
+      :inert="compactLayout ? (!sidebarOpen || panelOpen) : sidebarCollapsed"
       :role="compactLayout ? 'dialog' : undefined"
       :aria-modal="compactLayout && sidebarOpen ? true : undefined"
       aria-labelledby="sidebar-title"
@@ -23,11 +23,11 @@
           <span id="sidebar-title">Paper Scout</span>
         </a>
         <button ref="sidebarCloseButton" class="icon-button sidebar-close" aria-label="关闭对话列表" @click="closeSidebar">
-          <UiIcon name="close" />
+          <UiIcon :name="compactLayout ? 'close' : 'panelLeft'" />
         </button>
       </div>
       <button class="new-chat" aria-label="新建对话" @click="newConversation">
-        <UiIcon name="plus" /><span>新建对话</span><UiIcon name="edit" class="new-chat-end" />
+        <UiIcon name="edit" /><span>新建对话</span>
       </button>
       <label class="history-search">
         <UiIcon name="search" />
@@ -45,7 +45,7 @@
         <section v-for="group in historyGroups" :key="group.label" class="history-group">
           <h2>{{ group.label }}</h2>
           <div v-for="task in group.tasks" :key="task.id" class="history-item" :class="{ selected: selectedKey === task.id }">
-            <button class="history-select" :aria-current="selectedKey === task.id ? 'true' : undefined" :title="taskTitle(task)" @click="selectConversation(task.id)"><UiIcon name="chat" /><span class="history-copy"><span class="history-title">{{ taskTitle(task) }}</span><small>{{ shortDate(task.updated_at) }}<span v-if="drafts[task.id]"> · 草稿</span><span v-if="pending[task.id]"> · 发送待确认</span></small></span></button>
+            <button class="history-select" :aria-current="selectedKey === task.id ? 'true' : undefined" :title="taskTitle(task)" @click="selectConversation(task.id)"><span class="history-copy"><span class="history-title">{{ taskTitle(task) }}</span></span><small class="history-date">{{ pending[task.id] ? '待确认' : drafts[task.id] ? '草稿' : shortDate(task.updated_at) }}</small></button>
             <details data-menu class="history-menu"><summary :aria-label="`对话操作：${taskTitle(task)}`"><UiIcon name="more" /></summary><div><button type="button" :disabled="conversationActionBusy || !!pending[task.id]" @click="openConversationAction('rename', task)"><UiIcon name="edit" />重命名</button><button type="button" class="danger-text" :disabled="conversationActionBusy" @click="openConversationAction('trash', task)"><UiIcon name="trash" />删除对话</button></div></details>
           </div>
         </section>
@@ -60,8 +60,8 @@
     <section class="chat-shell" :inert="compactLayout && (sidebarOpen || panelOpen)" aria-label="研究对话">
       <header class="chat-header">
         <div class="header-title">
-          <button ref="sidebarToggleButton" class="icon-button menu-toggle" aria-label="打开对话列表" :aria-expanded="sidebarOpen" @click="openSidebar">
-            <UiIcon name="menu" />
+          <button ref="sidebarToggleButton" class="icon-button menu-toggle" aria-label="打开对话列表" :aria-expanded="compactLayout ? sidebarOpen : !sidebarCollapsed" @click="openSidebar">
+            <UiIcon name="panelLeft" />
           </button>
           <div>
             <h1 :title="conversation ? taskTitle(conversation.task) : undefined">{{ (conversation ? taskTitle(conversation.task) : '') || (selectedKey === NEW_CHAT ? 'Paper Scout' : '正在读取对话…') }}</h1>
@@ -90,9 +90,8 @@
         <div ref="timelineElement" class="timeline-scroll" @scroll="trackScroll">
           <div class="timeline-content">
             <section v-if="selectedKey === NEW_CHAT" class="empty-state">
-              <div class="welcome-emblem" aria-hidden="true"><UiIcon name="scout" /></div>
               <h2>今天，想研究什么？</h2>
-              <p class="empty-description">描述一个问题，或从一个想法开始。</p>
+              <p class="empty-description">从一个问题开始，一起找到有据可查的答案。</p>
             </section>
 
             <p v-if="conversationLoading" class="muted" role="status">正在读取对话…</p>
@@ -115,29 +114,30 @@
                   <button class="text-button" @click="openRun(entry.run.id)">查看这次运行的资料与报告<UiIcon name="arrowRight" /></button>
                 </section>
                 <article v-else class="message" :class="[entry.message.role, entry.message.status]" :aria-label="entry.message.role === 'user' ? '用户消息' : '助手消息'">
-                  <div class="message-avatar" aria-hidden="true"><span v-if="entry.message.role === 'user'">你</span><UiIcon v-else name="scout" /></div>
                   <div class="message-body">
-                    <div class="message-heading">
-                      <strong>{{ entry.message.role === 'user' ? '你' : 'Paper Scout' }}</strong>
-                      <time>{{ formatTime(entry.message.created_at) }}</time>
-                      <span v-if="entry.message.status !== 'completed'" class="message-status" :class="entry.message.status">{{ messageLabels[entry.message.status] }}</span>
-                    </div>
-                    <p v-if="entry.message.content" class="message-text">{{ entry.message.content }}</p>
-                    <p v-else class="muted processing-placeholder"><span v-if="['queued', 'processing'].includes(entry.message.status)" class="processing-dots" aria-hidden="true"><i></i><i></i><i></i></span>{{ messageLabels[entry.message.status] }}{{ entry.message.status === 'processing' ? '，完成后显示实际回复。' : '' }}</p>
+                    <template v-if="entry.message.content">
+                      <p v-if="entry.message.role === 'user'" class="message-text" :title="formatTime(entry.message.created_at)">{{ entry.message.content }}</p>
+                      <MessageMarkdown v-else :content="entry.message.content" />
+                    </template>
+                    <p v-else class="processing-placeholder" role="status"><span v-if="['queued', 'processing'].includes(entry.message.status)" class="processing-indicator" aria-hidden="true"></span>{{ messageLabels[entry.message.status] }}…</p>
+                    <span v-if="entry.message.content && entry.message.status !== 'completed'" class="message-status" :class="entry.message.status">{{ messageLabels[entry.message.status] }}</span>
                     <p v-if="entry.message.error_category" class="error-message" role="alert">错误类别：{{ entry.message.error_category }}</p>
                     <div v-if="entry.message.citations.length" class="citation-buttons" aria-label="回答引用">
                       <button v-for="(citation, index) in entry.message.citations" :key="`${citation.source_text_id}-${index}`" :aria-label="`引用 ${index + 1}：${sourceLabels[citation.source_type]}${citation.page_number != null ? `，PDF 第 ${citation.page_number} 页` : ''}`" :title="citation.quote" @click="openCitation(citation)">
                         <span>[{{ index + 1 }}]</span>{{ sourceLabels[citation.source_type] }}{{ citation.page_number != null ? ` · p${citation.page_number}` : '' }}<UiIcon name="arrowUpRight" />
                       </button>
                     </div>
-                    <button v-if="entry.message.role === 'assistant' && entry.message.content && entry.message.status === 'completed'" class="message-copy text-button" type="button" @click="copyMessage(entry.message.content)"><UiIcon name="copy" />复制回复</button>
-                    <button v-if="entry.message.run_id" class="message-artifact text-button" @click="openRun(entry.message.run_id!)"><UiIcon name="documents" />查看相关调研资料</button>
+                    <div v-if="entry.message.role === 'assistant' && (entry.message.content || entry.message.run_id)" class="message-actions">
+                      <button v-if="entry.message.content && entry.message.status === 'completed'" class="message-copy icon-button" type="button" aria-label="复制回复" title="复制回复" @click="copyMessage(entry.message.content)"><UiIcon name="copy" /></button>
+                      <button v-if="entry.message.run_id" class="message-artifact text-button" @click="openRun(entry.message.run_id!)"><UiIcon name="documents" />查看调研资料</button>
+                      <time :datetime="entry.message.created_at">{{ formatTime(entry.message.created_at) }}</time>
+                    </div>
                   </div>
                 </article>
               </template>
               <p v-if="!conversation.messages.length && !conversation.runs.length" class="muted">这条记录还没有对话或调研。可以在下方直接继续。</p>
               <details v-if="latestRun" class="process-records" :open="processOpen" @toggle="onProcessToggle">
-                <summary><span class="process-label"><UiIcon name="process" />过程记录</span><span class="process-summary">{{ processOpen ? '收起' : '按需查看实际执行记录' }} · {{ latestRun.current_round }}/{{ latestRun.max_rounds }} 轮<UiIcon name="chevronDown" /></span></summary>
+                <summary><span class="process-label"><UiIcon name="chevronRight" />过程记录</span><span class="process-summary">{{ stageLabels[latestRun.stage] }} · {{ latestRun.current_round }}/{{ latestRun.max_rounds }} 轮</span></summary>
                 <div class="process-content">
                   <p class="muted">这是后端执行记录，不是模型的思维过程。{{ runLabels[latestRun.status] }} · {{ stageLabels[latestRun.stage] }}</p>
                   <p v-if="processLoading" class="muted" role="status">正在读取过程记录…</p>
@@ -146,6 +146,7 @@
                     <li v-for="event in processEvents" :key="event.id"><time>{{ formatTime(event.created_at) }}</time><span>{{ stageLabels[event.stage] }} · {{ event.category }}</span><p>{{ event.message }}</p></li>
                   </ol>
                   <p v-else-if="!processLoading && !processError" class="muted">暂无已保存的执行记录。</p>
+                  <p v-if="latestRun.stop_reason" class="muted">停止说明：{{ latestRun.stop_reason }}</p>
                   <ul v-if="latestRun.gaps.length" class="gap-list"><li v-for="gap in latestRun.gaps" :key="gap">{{ gap }}</li></ul>
                 </div>
               </details>
@@ -160,7 +161,6 @@
               <i :class="{ running: isResearchRunning }" aria-hidden="true"></i>
               <strong>{{ conversation.busy ? '对话处理中' : latestRun ? runLabels[latestRun.status] : '可以继续对话' }}</strong>
               <span v-if="latestRun && isResearchRunning">{{ stageLabels[latestRun.stage] }}</span>
-              <span>{{ conversation.usage.model_calls }} 次模型调用 · {{ Math.round(conversation.usage.total_execution_seconds) }} 秒</span>
             </div>
             <div class="execution-actions">
               <details data-menu class="usage-details">
@@ -181,10 +181,8 @@
               </details>
               <button v-if="canPause" :disabled="controlsDisabled" @click="sendControl('pause')">暂停</button>
               <button v-if="canResume" :disabled="controlsDisabled" @click="sendControl('resume')">继续</button>
-              <button v-if="activeRun || conversation.busy" class="stop-button" :disabled="!!currentPending || stopBusy" @click="stopWork">{{ stopBusy ? '正在停止…' : '停止' }}</button>
             </div>
           </div>
-          <p v-if="latestRun?.stop_reason && !isResearchRunning" class="stop-note">{{ latestRun.stop_reason }}</p>
           <div v-if="currentPending" class="pending-notice" role="status">
             <div><strong>{{ currentPending.busy ? '正在发送…' : '发送未确认' }}</strong><p>{{ currentPending.error || '消息确认前保留草稿，不会重复提交。' }}</p><blockquote v-if="!currentPending.busy">{{ currentPending.content }}</blockquote></div>
             <button v-if="!currentPending.busy" class="text-button" aria-label="重试发送" @click="retrySend">重试原消息</button>
@@ -193,22 +191,26 @@
           <div v-if="notice" class="workspace-notice" :class="{ 'notice-error': noticeError }" :role="noticeError ? 'alert' : 'status'"><span>{{ notice }}</span><button v-if="undoTask" type="button" class="text-button" :disabled="conversationActionBusy" @click="restoreTask(undoTask.id)">撤销删除</button><button type="button" class="icon-button" aria-label="关闭提示" @click="notice = ''; undoTask = null"><UiIcon name="close" /></button></div>
           <form class="composer" @submit.prevent="sendDraft">
             <label class="sr-only" for="chat-input">输入消息</label>
-            <textarea id="chat-input" ref="inputElement" v-model="draft" :maxlength="inputLimit" rows="2" :placeholder="selectedKey === NEW_CHAT ? '你想研究什么？试着描述一个问题…' : '继续追问、补充方向，或聊聊已有资料…'" :title="preferences.sendShortcut === 'enter' ? 'Enter 发送，Shift + Enter 换行' : 'Ctrl / ⌘ + Enter 发送，Enter 换行'" aria-label="输入消息" @keydown="handleInputKey"></textarea>
+            <textarea id="chat-input" ref="inputElement" v-model="draft" :maxlength="inputLimit" rows="2" :placeholder="selectedKey === NEW_CHAT ? '描述你想研究的问题' : '继续提问，或补充研究方向'" :title="preferences.sendShortcut === 'enter' ? 'Enter 发送，Shift + Enter 换行' : 'Ctrl / ⌘ + Enter 发送，Enter 换行'" aria-label="输入消息" @keydown="handleInputKey"></textarea>
             <div class="composer-bottom">
               <div class="composer-options">
+                <details ref="modelMenu" data-menu class="model-menu" @toggle="onModelMenuToggle">
+                  <summary aria-label="选择当前模型" :title="currentProvider?.name"><span>{{ modelSettings?.enabled ? modelSettings.model : '选择模型' }}</span><UiIcon name="chevronDown" /></summary>
+                  <div class="model-menu-options"><p>选择用于后续对话的模型</p><div v-for="provider in availableProviders" :key="provider.id" class="model-menu-provider"><p>{{ provider.name }}</p><button v-for="model in provider.models" :key="model" type="button" :disabled="modelChangeBusy || settingsBusy || !!modelSettings?.busy" :aria-label="`${provider.name} · ${model}`" :aria-pressed="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" @click="chooseModel(provider.id, model)"><span><strong>{{ model }}</strong></span><UiIcon v-if="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" name="check" /></button></div><p v-if="modelSettings?.busy">执行中的工作结束或暂停后可切换。</p><button type="button" class="manage-models" @click="closeMenus(); openSettings('model')"><UiIcon name="settings" />管理AI服务</button></div>
+                </details>
                 <details ref="intentMenu" data-menu class="intent-menu">
                   <summary aria-label="选择消息意图"><UiIcon :name="currentMode === 'research' ? 'search' : currentMode === 'ask' ? 'book' : 'chat'" />{{ modeLabels[currentMode] }}<UiIcon name="chevronDown" /></summary>
                   <div class="intent-options">
                     <button v-for="mode in intentModes" :key="mode" type="button" :class="{ selected: currentMode === mode }" :aria-pressed="currentMode === mode" @click="chooseMode(mode)"><span>{{ modeLabels[mode] }}</span><small>{{ modeDescriptions[mode] }}</small></button>
                   </div>
                 </details>
-                <details ref="modelMenu" data-menu class="model-menu" @toggle="onModelMenuToggle">
-                  <summary aria-label="选择当前模型"><UiIcon name="model" /><span>{{ modelSettings?.enabled ? `${currentProvider?.name || ''} · ${modelSettings.model}` : '选择模型' }}</span><UiIcon name="chevronDown" /></summary>
-                  <div class="model-menu-options"><p>选择用于后续对话的模型</p><div v-for="provider in availableProviders" :key="provider.id" class="model-menu-provider"><p>{{ provider.name }}</p><button v-for="model in provider.models" :key="model" type="button" :disabled="modelChangeBusy || settingsBusy || !!modelSettings?.busy" :aria-label="`${provider.name} · ${model}`" :aria-pressed="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" @click="chooseModel(provider.id, model)"><span><strong>{{ model }}</strong></span><UiIcon v-if="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" name="check" /></button></div><p v-if="modelSettings?.busy">执行中的工作结束或暂停后可切换。</p><button type="button" class="manage-models" @click="closeMenus(); openSettings('model')"><UiIcon name="settings" />管理AI服务</button></div>
-                </details>
                 <span class="input-hint">{{ conversation?.busy ? '等待当前回复完成再发送' : isResearchRunning ? '可直接补充，系统会保存检查点' : 'Enter 发送 · Shift + Enter 换行' }}</span>
               </div>
-              <div class="send-group"><span v-if="draft.length" class="char-count">{{ draft.length }}/{{ inputLimit }}</span><button type="submit" class="send-button" aria-label="发送消息" :disabled="!canSend"><UiIcon name="arrowUp" /></button></div>
+              <div class="send-group">
+                <span v-if="draft.length" class="char-count">{{ draft.length }}/{{ inputLimit }}</span>
+                <button v-if="activeRun || conversation?.busy" type="button" class="send-button stop-button" aria-label="停止" :title="stopBusy ? '正在停止…' : '停止当前工作'" :disabled="!!currentPending || stopBusy" @click="stopWork"><UiIcon name="stop" /></button>
+                <button v-if="!conversation?.busy && (!isResearchRunning || draft.trim())" type="submit" class="send-button" aria-label="发送消息" :disabled="!canSend"><UiIcon name="arrowUp" /></button>
+              </div>
             </div>
           </form>
           <div class="composer-footnote">
@@ -217,7 +219,7 @@
           </div>
         </footer>
         <section v-if="selectedKey === NEW_CHAT" class="starter-section" aria-labelledby="examples-title">
-          <div class="starter-heading"><h3 id="examples-title">试试这些方向</h3><span>点击填入草稿</span></div>
+          <div class="starter-heading"><h3 id="examples-title">从这些方向开始</h3></div>
           <div class="example-prompts">
             <button v-for="example in examples" :key="example.title" :disabled="!!currentPending" @click="useExample(example.text)"><UiIcon :name="example.icon" /><span>{{ example.title }}</span><UiIcon name="arrowUpRight" /></button>
           </div>
@@ -234,7 +236,7 @@
       aria-labelledby="materials-title"
     >
       <header class="panel-header">
-        <div><p class="panel-eyebrow">RESEARCH NOTEBOOK</p><h2 id="materials-title"><UiIcon name="documents" />资料与报告</h2><p>让每一条线索，都有据可查</p></div>
+        <h2 id="materials-title"><UiIcon name="documents" />资料与报告</h2>
         <button ref="panelCloseButton" class="icon-button" aria-label="关闭资料面板" @click="closePanel"><UiIcon name="close" /></button>
       </header>
       <div class="panel-content">
@@ -245,7 +247,8 @@
         <p v-if="selectedRun" class="panel-note">{{ selectedRun.initial_input?.topic || selectedRun.initial_topic }}</p>
         <div class="panel-tabs" aria-label="资料类型">
           <button :class="{ active: panelTab === 'papers' }" :aria-pressed="panelTab === 'papers'" @click="panelTab = 'papers'"><UiIcon name="book" />文献<span v-if="artifact?.loaded">{{ artifact.papers.length }}</span></button>
-          <button :class="{ active: panelTab === 'report' }" :aria-pressed="panelTab === 'report'" @click="panelTab = 'report'; clearPaper()"><UiIcon name="documents" />Markdown 报告</button>
+          <button :class="{ active: panelTab === 'analysis' }" :aria-pressed="panelTab === 'analysis'" @click="panelTab = 'analysis'; clearPaper()">分析与比较</button>
+          <button :class="{ active: panelTab === 'report' }" :aria-pressed="panelTab === 'report'" @click="panelTab = 'report'; clearPaper()"><UiIcon name="documents" />研究报告</button>
         </div>
         <div v-if="artifactError" class="error-message" role="alert">{{ artifactError }}<button class="text-button" @click="loadArtifacts">重新获取资料</button></div>
         <p v-if="artifactLoading" class="muted" role="status">正在读取本次资料…</p>
@@ -265,12 +268,17 @@
             <p v-if="artifact?.loaded && !artifact.papers.length" class="muted">本次成功读取的检索结果中暂无已选论文。</p>
           </template>
         </template>
-        <template v-else>
+        <ResearchAnalysisView v-else-if="panelTab === 'analysis' && selectedRun" :run="selectedRun" @paper="openPaper" />
+        <template v-else-if="panelTab === 'report'">
           <template v-if="artifact?.report">
-            <div class="report-heading"><h3>阶段性报告</h3><button :disabled="downloadBusy" class="download-button" @click="downloadReport">{{ downloadBusy ? '下载中…' : '下载 .md' }}<UiIcon name="arrowDown" /></button></div>
+            <div class="report-heading"><h3>报告快照</h3><div class="report-downloads"><button :disabled="downloadBusy" class="download-button" @click="downloadReport('md')">下载 .md</button><button v-if="artifact.report.document" :disabled="downloadBusy" class="download-button" @click="downloadReport('docx')">Word</button><button v-if="artifact.report.document" :disabled="downloadBusy" class="download-button" @click="downloadReport('pdf')">PDF</button></div></div>
             <p class="report-title">{{ artifact.report.title }}</p>
             <p v-if="downloadError" class="error-message" role="alert">{{ downloadError }}</p>
-            <p class="panel-note">Markdown 原文预览，未渲染 HTML。阶段性报告不代表自主分析已经完成。</p>
+            <p class="panel-note">三个格式绑定当前报告 ID。引用定位可核查，语义支持仍需人工复核；阶段性结果不代表覆盖充分。</p>
+            <div v-if="artifact.report.document" class="report-claims">
+              <section v-for="section in artifact.report.document.sections" :key="section.title"><h4>{{ section.title }}</h4><div v-for="(claim, index) in section.claims" :key="index"><p><small>{{ originLabels[claim.origin] }}</small> {{ claim.text }}</p><button v-for="(id, evidenceIndex) in claim.evidence_ids" :key="id" class="text-button" @click="openReportEvidence(id)">查看依据 {{ evidenceIndex + 1 }}</button></div></section>
+              <p class="panel-note">{{ artifact.report.document.semantic_review }}</p>
+            </div>
             <ul v-if="artifact.report.gaps.length" class="gap-list"><li v-for="gap in artifact.report.gaps" :key="gap">{{ gap }}</li></ul>
             <p v-if="artifact.report.stop_reason" class="muted">停止说明：{{ artifact.report.stop_reason }}</p>
             <pre class="markdown-preview">{{ artifact.report.content_markdown }}</pre>
@@ -287,6 +295,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import UiIcon from './components/UiIcon.vue';
+import MessageMarkdown from './components/MessageMarkdown.vue';
+import ResearchAnalysisView from './components/ResearchAnalysis.vue';
+import { originLabels } from './analysisLabels';
 import PaperDetailView from './components/PaperDetail.vue';
 import SettingsDialog from './components/SettingsDialog.vue';
 import ActionDialog from './components/ActionDialog.vue';
@@ -295,7 +306,7 @@ import { useDismissableMenus, closeMenus } from './composables/useDismissableMen
 import { usePreferences } from './composables/usePreferences';
 import { runLabels, stageLabels } from './runLabels';
 import type { ModelSettings } from './api/client';
-import { ApiError, getModelSettings, selectProviderModel, renameConversation, trashConversation, restoreConversation, getConversations, getConversation, sendConversationMessage, stopConversation, getPapers, getRunEvents, getReport, getPaperDetail, getMarkdownReport, type Task, type ConversationView, type ChatMode, type ChatMessage, type ChatCitation, type Run, type RunStatus, type ChatStatus, type SourceType, type Paper, type Report, type RunEvent, type PaperDetail } from './api/client.ts';
+import { ApiError, getModelSettings, selectProviderModel, renameConversation, trashConversation, restoreConversation, getConversations, getConversation, sendConversationMessage, stopConversation, getPapers, getRunEvents, getReport, getPaperDetail, getReportFile, type Task, type ConversationView, type ChatMode, type ChatMessage, type ChatCitation, type Run, type RunStatus, type ChatStatus, type SourceType, type Paper, type Report, type RunEvent, type PaperDetail } from './api/client.ts';
 
 const NEW_CHAT = '__new__';
 useDismissableMenus();
@@ -399,6 +410,7 @@ const examples = [
 const compactQuery = window.matchMedia('(max-width: 1100px)');
 const compactLayout = ref(compactQuery.matches);
 const sidebarOpen = ref(false);
+const sidebarCollapsed = ref(false);
 const panelOpen = ref(false);
 const sidebarElement = ref<HTMLElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
@@ -407,7 +419,7 @@ const sidebarCloseButton = ref<HTMLButtonElement | null>(null);
 const panelCloseButton = ref<HTMLButtonElement | null>(null);
 const artifactToggleButton = ref<HTMLButtonElement | null>(null);
 let panelReturnFocus: HTMLElement | null = null;
-const panelTab = ref<'papers' | 'report'>('papers');
+const panelTab = ref<'papers' | 'analysis' | 'report'>('papers');
 const timelineElement = ref<HTMLElement | null>(null);
 const inputElement = ref<HTMLTextAreaElement | null>(null);
 const intentMenu = ref<HTMLDetailsElement | null>(null);
@@ -426,7 +438,7 @@ const artifacts = reactive<Record<string, ArtifactData>>({});
 const artifact = computed(() => artifacts[selectedRunId.value]);
 const artifactLoading = ref(false);
 const artifactError = ref('');
-const paperSelection = ref<{ runId: string; paperId: string } | null>(null);
+const paperSelection = ref<{ runId: string; paperId: string; evidenceId?: string } | null>(null);
 const paperDetail = ref<PaperDetail | null>(null);
 const selectedCitation = ref<ChatCitation | null>(null);
 const paperLoading = ref(false);
@@ -434,6 +446,7 @@ const paperError = ref('');
 const processOpen = ref(false);
 const processEvents = ref<RunEvent[]>([]);
 let processRunId = '';
+let processLoaded = false;
 const processLoading = ref(false);
 const processError = ref('');
 const downloadBusy = ref(false);
@@ -477,9 +490,16 @@ function resizeInput() {
 }
 watch(draft, () => { void nextTick(resizeInput); });
 watch(() => preferences.textSize, () => { void nextTick(resizeInput); });
-function openSidebar() { sidebarOpen.value = true; }
+function openSidebar() {
+  if (compactLayout.value) sidebarOpen.value = true;
+  else {
+    sidebarCollapsed.value = false;
+    void nextTick(() => sidebarCloseButton.value?.focus());
+  }
+}
 function closeSidebar() {
-  sidebarOpen.value = false;
+  if (compactLayout.value) sidebarOpen.value = false;
+  else sidebarCollapsed.value = true;
   void nextTick(() => sidebarToggleButton.value?.focus());
 }
 function onLayoutChange(event: MediaQueryListEvent) {
@@ -520,10 +540,11 @@ function handleOverlayKey(event: KeyboardEvent) {
 function runNumber(id: string) { return [...sortedRuns.value].reverse().findIndex(run => run.id === id) + 1; }
 function trackScroll() { const element = timelineElement.value; if (element) nearBottom.value = element.scrollHeight - element.scrollTop - element.clientHeight < 110; }
 function scrollToBottom() { const element = timelineElement.value; if (element) { element.scrollTop = element.scrollHeight; nearBottom.value = true; } }
-async function scrollIfNeeded(shouldScroll: boolean) {
+async function scrollIfNeeded(shouldScroll: boolean, previousHeight: number | undefined) {
   const version = viewVersion; const key = selectedKey.value; await nextTick();
   if (version !== viewVersion || key !== selectedKey.value) return;
-  if (preferences.autoScroll && shouldScroll && nearBottom.value) scrollToBottom();
+  const heightChanged = timelineElement.value?.scrollHeight !== previousHeight;
+  if (preferences.autoScroll && shouldScroll && nearBottom.value && heightChanged) scrollToBottom();
   else trackScroll();
 }
 function chooseMode(mode: ChatMode) { modes[selectedKey.value] = mode; if (intentMenu.value) intentMenu.value.open = false; }
@@ -534,11 +555,24 @@ function handleInputKey(event: KeyboardEvent) {
   if (event.altKey || (preferences.sendShortcut === 'modifier-enter' && !modified)) return;
   event.preventDefault(); void sendDraft();
 }
-function upsertTask(task: Task) { if (trashedIds.has(task.id)) return; const index = tasks.value.findIndex(item => item.id === task.id); if (index >= 0) tasks.value.splice(index, 1); tasks.value.unshift(task); historyWriteVersion++; }
-function applyConversation(data: ConversationView, shouldScroll: boolean) { if (trashedIds.has(data.task.id)) return; views[data.task.id] = data; upsertTask(data.task); if (selectedKey.value === data.task.id) void scrollIfNeeded(shouldScroll); }
+function upsertTask(task: Task) {
+  if (trashedIds.has(task.id)) return;
+  const index = tasks.value.findIndex(item => item.id === task.id);
+  if (index >= 0) tasks.value[index] = task;
+  else tasks.value.push(task);
+  tasks.value.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  historyWriteVersion++;
+}
+function applyConversation(data: ConversationView, shouldScroll: boolean) {
+  if (trashedIds.has(data.task.id)) return;
+  const previousHeight = timelineElement.value?.scrollHeight;
+  views[data.task.id] = data;
+  upsertTask(data.task);
+  if (selectedKey.value === data.task.id) void scrollIfNeeded(shouldScroll, previousHeight);
+}
 function stopPolling() { pollVersion++; if (pollTimer !== null) clearTimeout(pollTimer); pollTimer = null; pollController?.abort(); pollController = null; }
 function abortMaterials() { artifactVersion++; artifactController?.abort(); artifactLoading.value = false; processVersion++; processController?.abort(); processLoading.value = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); }
-function beginView() { closeMenus(); viewVersion++; stopPolling(); sendController?.abort(); stopController?.abort(); stopBusy.value = false; abortMaterials(); conversationLoading.value = false; conversationError.value = ''; artifactError.value = ''; processError.value = ''; downloadError.value = ''; processEvents.value = []; processOpen.value = false; panelOpen.value = false; sidebarOpen.value = false; }
+function beginView() { closeMenus(); viewVersion++; stopPolling(); sendController?.abort(); stopController?.abort(); stopBusy.value = false; abortMaterials(); conversationLoading.value = false; conversationError.value = ''; artifactError.value = ''; processError.value = ''; downloadError.value = ''; processEvents.value = []; processRunId = ''; processLoaded = false; processOpen.value = false; panelOpen.value = false; sidebarOpen.value = false; }
 function newConversation() { historyQuery.value = ''; beginView(); selectedKey.value = NEW_CHAT; nearBottom.value = true; void nextTick(() => { scrollToBottom(); inputElement.value?.focus(); }); }
 function selectConversation(taskId: string, acknowledged?: ConversationView) {
   const fromSidebar = compactLayout.value && sidebarOpen.value;
@@ -689,14 +723,15 @@ function closePanel() { panelOpen.value = false; artifactVersion++; artifactCont
 function togglePanel() { if (panelOpen.value) closePanel(); else { if (!selectedRuns[selectedKey.value] && latestRun.value) selectedRuns[selectedKey.value] = latestRun.value.id; panelOpen.value = true; void loadArtifacts(); } }
 function chooseRun(runId: string) { selectedRuns[selectedKey.value] = runId; if (runMenu.value) runMenu.value.open = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); artifactError.value = ''; downloadError.value = ''; void loadArtifacts(); }
 function openRun(runId: string) { panelOpen.value = true; panelTab.value = 'papers'; chooseRun(runId); }
-function openPaper(paperId: string) { clearPaper(); paperSelection.value = { runId: selectedRunId.value, paperId }; void loadPaper(); }
+function openPaper(paperId: string, evidenceId?: string) { clearPaper(); panelTab.value = 'papers'; paperSelection.value = { runId: selectedRunId.value, paperId, evidenceId }; void loadPaper(); }
+function openReportEvidence(id: string) { const evidence = artifact.value?.report?.document?.evidence.find(item => item.id === id); if (evidence) openPaper(evidence.paper_id, id); }
 function openCitation(citation: ChatCitation) { downloadController?.abort(); downloadBusy.value = false; downloadError.value = ''; panelOpen.value = true; panelTab.value = 'papers'; selectedRuns[selectedKey.value] = citation.run_id; clearPaper(); selectedCitation.value = citation; paperSelection.value = { runId: citation.run_id, paperId: citation.paper_id }; void loadArtifacts(); void loadPaper(); }
 async function loadArtifacts() {
   if (!panelOpen.value || !selectedRunId.value) return;
   artifactController?.abort(); const controller = new AbortController(); artifactController = controller;
   const version = ++artifactVersion; const view = viewVersion; const runId = selectedRunId.value;
   const active = () => !disposed && view === viewVersion && version === artifactVersion && panelOpen.value && runId === selectedRunId.value && !controller.signal.aborted;
-  artifactLoading.value = true;
+  artifactLoading.value = !artifacts[runId]?.loaded;
   try {
     const [paperResult, reportResult] = await Promise.allSettled([getPapers(runId, controller.signal), getReport(runId, controller.signal)]); if (!active()) return;
     const data = artifacts[runId] || { papers: [], report: null, reportNotice: '', loaded: false }; const errors: string[] = [];
@@ -713,7 +748,15 @@ async function loadPaper() {
   const version = ++paperVersion; const view = viewVersion;
   const active = () => !disposed && view === viewVersion && version === paperVersion && !controller.signal.aborted;
   paperLoading.value = true; paperError.value = '';
-  try { const data = await getPaperDetail(selection.runId, selection.paperId, controller.signal); if (active()) paperDetail.value = data; }
+  try {
+    const data = await getPaperDetail(selection.runId, selection.paperId, controller.signal);
+    if (active()) {
+      paperDetail.value = data;
+      const evidence = data.evidence.find(item => item.id === selection.evidenceId);
+      const source = data.sources.find(item => item.id === evidence?.source_text_id);
+      if (evidence && source) selectedCitation.value = { ...evidence, run_id: selection.runId, source_type: source.source_type, source_url: source.source_url };
+    }
+  }
   catch (error) { if (active()) paperError.value = `读取论文详情失败：${errorText(error)}`; }
   finally { if (active()) paperLoading.value = false; }
 }
@@ -722,19 +765,27 @@ async function loadProcess() {
   if (!processOpen.value || !latestRun.value) return;
   processController?.abort(); const controller = new AbortController(); processController = controller;
   const version = ++processVersion; const view = viewVersion; const runId = latestRun.value.id;
-  if (processRunId !== runId) { processRunId = runId; processEvents.value = []; processError.value = ''; }
+  if (processRunId !== runId) { processRunId = runId; processLoaded = false; processEvents.value = []; processError.value = ''; }
   const active = () => !disposed && view === viewVersion && version === processVersion && !controller.signal.aborted;
-  processLoading.value = true;
-  try { const data = await getRunEvents(runId, controller.signal); if (active()) { processEvents.value = data; processError.value = ''; } }
+  processLoading.value = !processLoaded;
+  try {
+    const data = await getRunEvents(runId, controller.signal);
+    if (active()) {
+      const previousHeight = timelineElement.value?.scrollHeight;
+      const shouldScroll = nearBottom.value;
+      processEvents.value = data; processLoaded = true; processError.value = ''; processLoading.value = false;
+      void scrollIfNeeded(shouldScroll, previousHeight);
+    }
+  }
   catch (error) { if (active()) processError.value = `读取过程失败：${errorText(error)}`; }
   finally { if (active()) processLoading.value = false; }
 }
-async function downloadReport() {
-  if (downloadBusy.value || !selectedRunId.value) return;
-  const runId = selectedRunId.value; const view = viewVersion;
+async function downloadReport(format: 'md' | 'docx' | 'pdf') {
+  if (downloadBusy.value || !selectedRunId.value || !artifact.value?.report) return;
+  const runId = selectedRunId.value; const reportId = artifact.value.report.id; const view = viewVersion;
   const controller = new AbortController(); downloadController = controller; downloadBusy.value = true; downloadError.value = '';
   const active = () => !disposed && view === viewVersion && runId === selectedRunId.value && !controller.signal.aborted;
-  try { const blob = await getMarkdownReport(runId, controller.signal); if (!active()) return; const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `paper-scout-${runId}.md`; link.click(); URL.revokeObjectURL(url); }
+  try { const blob = await getReportFile(runId, reportId, format, controller.signal); if (!active()) return; const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `paper-scout-${reportId}.${format}`; link.click(); URL.revokeObjectURL(url); }
   catch (error) { if (active()) downloadError.value = `下载失败：${errorText(error)}`; }
   finally { if (active()) downloadBusy.value = false; }
 }

@@ -131,7 +131,7 @@ export interface Task {
 }
 
 export type RunStatus = "queued" | "running" | "pause_requested" | "paused" | "needs_input" | "completed" | "partial" | "failed" | "cancelled" | "interrupted";
-export type RunStage = "understanding" | "planning" | "searching" | "extracting" | "assessing" | "synthesizing" | "reporting";
+export type RunStage = "understanding" | "planning" | "searching" | "screening" | "extracting" | "analyzing" | "assessing" | "synthesizing" | "reporting";
 
 export interface Run {
   id: string;
@@ -143,6 +143,7 @@ export interface Run {
   token_usage?: TokenUsage;
   status: RunStatus;
   stage: RunStage;
+  analysis_revision?: number;
   current_round: number;
   max_rounds: number;
   max_calls: number;
@@ -169,6 +170,7 @@ export interface RunEvent {
   id: string;
   run_id: string;
   stage: RunStage;
+  analysis_revision?: number;
   category: string;
   message: string;
   created_at: string;
@@ -211,10 +213,45 @@ export interface Evidence {
   location_end: number | null;
 }
 
+export interface Extraction {
+  id: string; field_name: string; value: string | null; missing_reason: string | null;
+  evidence_ids: string[]; origin: 'author' | 'inference' | 'user'; note: string;
+}
+export interface ReadRange {
+  source_text_id: string; source_type: SourceType; page_number: number | null;
+  location_start: number; location_end: number; original_length: number;
+}
+export interface PaperAnalysis {
+  id: string; paper_id: string; analysis_revision: number; status: 'completed' | 'failed' | 'unavailable';
+  fields: Extraction[]; ranges: ReadRange[]; error: string | null; reused_from: string | null;
+}
+export interface PaperSelection {
+  paper_id: string; relevant: boolean; reviewed: boolean; reason: string; subproblems: string[]; evidence_ids: string[];
+}
+export interface Comparison {
+  left_paper_id: string; right_paper_id: string; status: 'comparable' | 'not_comparable' | 'insufficient';
+  metric: string | null; left_value: string | null; right_value: string | null; reasons: string[]; evidence_ids: string[];
+}
+export interface Assessment {
+  sufficient: boolean; rule: string; supporting_papers: Record<string, string[]>; field_counts: Record<string, [number, number]>;
+  paper_groups: Record<string, string>; duplicate_candidates: string[][]; comparisons: Comparison[]; gaps: string[]; next_actions: string[];
+}
+export interface ResearchAnalysis {
+  analysis_revision: number; papers: Paper[]; analyses: PaperAnalysis[]; selections: PaperSelection[]; assessment: Assessment | null;
+}
+export interface ReportClaim { text: string; origin: 'author' | 'inference' | 'user'; evidence_ids: string[]; }
+export interface ReportDocument {
+  analysis_revision: number; sections: { title: string; claims: ReportClaim[] }[];
+  evidence: Evidence[]; semantic_review: string;
+}
 export interface PaperDetail {
   paper: Paper;
   sources: SourceText[];
   evidence: Evidence[];
+  analysis?: PaperAnalysis | null;
+  selection?: PaperSelection | null;
+  selected?: boolean;
+  analysis_revision?: number;
 }
 
 export interface Report {
@@ -222,6 +259,7 @@ export interface Report {
   run_id: string;
   title: string;
   content_markdown: string;
+  document?: ReportDocument | null;
   gaps: string[];
   stop_reason?: string | null;
 }
@@ -421,6 +459,14 @@ export async function getPapers(runId: string, signal?: AbortSignal): Promise<Pa
 export async function getReport(runId: string, signal?: AbortSignal): Promise<Report> {
   // 404 是运行不存在；409 是已有运行尚无报告，由界面分别展示。
   return (await request(`/runs/${runId}/report`, { signal })).json();
+}
+
+export async function getResearchAnalysis(runId: string, signal?: AbortSignal): Promise<ResearchAnalysis> {
+  return (await request(`/runs/${runId}/analysis`, { signal })).json();
+}
+
+export async function getReportFile(runId: string, reportId: string, format: 'md' | 'docx' | 'pdf', signal?: AbortSignal): Promise<Blob> {
+  return (await request(`/runs/${runId}/report.${format}?report_id=${encodeURIComponent(reportId)}`, { signal })).blob();
 }
 
 export async function getMarkdownReport(runId: string, signal?: AbortSignal): Promise<Blob> {

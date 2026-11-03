@@ -19,6 +19,8 @@ const icons = {
   plus: { paths: ['M12 4.5v15M4.5 12h15'] },
   refresh: { paths: ['M20 9a8.2 8.2 0 0 0-13.7-3L3.5 9', 'M3.5 4v5h5', 'M4 15a8.2 8.2 0 0 0 13.7 3l2.8-3', 'M15.5 15h5v5'] },
   menu: { paths: ['M4 6.5h16M4 12h16M4 17.5h16'] },
+  panelLeft: { paths: ['M4 4h16v16H4Z', 'M9 4v16'] },
+  stop: { paths: ['M7 7h10v10H7Z'] },
   close: { paths: ['m6 6 12 12M18 6 6 18'] },
   documents: { paths: ['M8 3h8l4 4v12H8Z', 'M16 3v4h4', 'M4 7v14h12', 'M11 11h6M11 15h4'] },
   arrowUp: { paths: ['M12 20V4M5.5 10.5 12 4l6.5 6.5'] },

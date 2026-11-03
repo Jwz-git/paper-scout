@@ -9,6 +9,7 @@ from backend.app.config import Settings
 from backend.app.domain.models import Paper
 from backend.app.main import create_app
 from backend.app.storage.database import Database
+from tests.analysis_samples import analysis_response, planned
 from backend.app.workflow.engine import WorkflowEngine
 
 
@@ -24,8 +25,10 @@ def test_conversation_http_worker_report_and_saved_source_followup(tmp_path):
             assert kwargs == {"response_format": "json_object"}
             request = json.loads(messages[-1].content)
             self.requests.append(request)
-            if "supplements" in request:
-                result = {"queries": ["all:offline-fixture"], "subproblems": ["communication"]}
+            if "operation" in request:
+                result = analysis_response(request)
+            elif "supplements" in request:
+                result = planned({"queries": ["all:offline-fixture"], "subproblems": ["communication"]})
             elif request["mode"] == "ask":
                 source = next(s for s in request["sources"] if s["source_type"] == "abstract")
                 quote = "An artificial abstract for offline integration."
@@ -72,15 +75,15 @@ def test_conversation_http_worker_report_and_saved_source_followup(tmp_path):
             view = client.get(f"/api/conversations/{task_id}").json()
             assert not view["busy"] and len(view["runs"]) == 1
             run = view["runs"][0]
-            assert run["status"] == "partial" and run["total_calls"] == 2
+            assert run["status"] == "partial" and run["total_calls"] == 5
             assert view["usage"]["model_calls"] == 1
-            assert search.calls == 1 and len(model.requests) == 2
+            assert search.calls == 1 and len(model.requests) == 5
             assert any("阶段性来源报告已保存" in m["content"] for m in view["messages"])
             report = client.get(f"/api/runs/{run['id']}/report.md")
             assert report.status_code == 200 and "Artificial integration fixture" in report.text
             retried = client.post("/api/conversations", json=first)
             assert retried.json()["task"]["id"] == task_id
-            assert len(model.requests) == 2 and search.calls == 1
+            assert len(model.requests) == 5 and search.calls == 1
 
             original_process = app.state.dialogue.process
 
@@ -100,9 +103,9 @@ def test_conversation_http_worker_report_and_saved_source_followup(tmp_path):
             source = next(s for s in detail["sources"] if s["id"] == reference["source_text_id"])
             assert source["content"][reference["location_start"]:reference["location_end"]] == reference["quote"]
             assert reference["page_number"] is None and reference["source_type"] == "abstract"
-            assert len(followup["runs"]) == 1 and search.calls == 1 and len(model.requests) == 3
+            assert len(followup["runs"]) == 1 and search.calls == 1 and len(model.requests) == 6
             assert followup["usage"]["model_calls"] == 2
             client.post(f"/api/conversations/{task_id}/messages", json=question)
-            assert len(model.requests) == 3 and search.calls == 1
+            assert len(model.requests) == 6 and search.calls == 1
     finally:
         db.close()

@@ -3,7 +3,8 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 import pytest
-from backend.app.adapters.llm import LLMError, LLMResponse, LLMUsage
+import httpx
+from backend.app.adapters.llm import LLMError, LLMResponse, LLMUsage, OpenAIResponsesAdapter
 from backend.app.dialogue import DialogueService
 from backend.app.domain.conversation import ConversationCreateRequest, ConversationMessageRequest
 from backend.app.domain.models import Paper, Run, RunStatus, SourceText, SourceType, Task, RunMessage
@@ -27,6 +28,9 @@ class Model:
         output = next(self.outputs)
         if isinstance(output, Exception):
             raise output
+        if "queries" in output:
+            from tests.analysis_samples import planned
+            output = planned(output)
         return LLMResponse(content=json.dumps(output),parsed_json=output,
             usage=LLMUsage(prompt_tokens=3,completion_tokens=4,total_tokens=7))
 
@@ -365,9 +369,88 @@ def test_timeout_and_failed_call_usage_unknown_is_not_zero(db):
     assert all(v is None for v in store.usage("t").token_usage.values())
 
 
+@pytest.mark.parametrize("fenced", [False, True])
+def test_responses_final_answer_creates_research_once_despite_commentary(db, fenced):
+    calls = []
+    text = json.dumps(research())
+    if fenced:
+        text = "```json\n" + text + "\n```"
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"status":"completed", "usage":{"input_tokens":5,"output_tokens":7}, "output":[
+            {"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Preparing the research request."}]},
+            {"type":"message","phase":"final_answer","content":[{"type":"output_text","text":text}]},
+        ]})
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = DialogueService(db, OpenAIResponsesAdapter("https://model.test/v1", "fixture", client=client))
+            tid = service.store.enqueue(req(create=True))
+            await service.process(service.store.next_turn())
+            answer = turn_answer(service.store, tid)
+            assert answer.status == "completed" and answer.action == "research"
+            runs = db.list_runs(tid)
+            assert len(runs) == 1 and runs[0].status == RunStatus.QUEUED
+            assert runs[0].total_calls == 0
+            assert service.store.usage(tid).model_calls == 1
+            assert service.store.usage(tid).token_usage["total_tokens"] == 12
+            assert service.store.enqueue(req(create=True)) == tid
+            assert service.store.next_turn() is None
+    asyncio.run(scenario())
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("text, diagnostic", [
+    ('```json\n{"private_marker":true}', "JSON代码块"),
+    ('```json\n{"private_marker": }\n```', "JSON正文语法错误"),
+    ('{\n"private_marker":\n}', "第3行"),
+    ('["private_marker"]', "顶层"),
+])
+def test_json_diagnostic_is_visible_without_response_or_automatic_retry(db, text, diagnostic):
+    store = legacy(db)
+    store.enqueue(req("input", "json-diagnostic"), "t")
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"status":"completed", "usage":{"input_tokens":5,"output_tokens":7}, "output":[
+            {"type":"message","phase":"final_answer","content":[{"type":"output_text","text":text}]}]})
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = DialogueService(db, OpenAIResponsesAdapter("https://model.test/v1", "fixture", client=client))
+            await service.process(store.next_turn())
+    asyncio.run(scenario())
+    answer = turn_answer(store, "t")
+    assert answer.status == "failed" and answer.error_category == "invalid_json"
+    assert diagnostic in answer.content and "private_marker" not in answer.content
+    assert len(calls) == 1 and store.next_turn() is None
+    assert store.usage("t").model_calls == 1 and store.usage("t").token_usage["total_tokens"] == 12
+    assert db.get_run("r").status == RunStatus.PAUSED and db.get_run("r").total_calls == 0
+
+
+def test_fenced_json_does_not_bypass_dialogue_field_validation(db):
+    store = legacy(db)
+    store.enqueue(req("input", "fenced-schema"), "t")
+    calls = []
+    def handler(request):
+        calls.append(request)
+        text = '```json\n{"action":"research","content":"Artificial request without task_input"}\n```'
+        return httpx.Response(200, json={"status":"completed", "output":[
+            {"type":"message","phase":"final_answer","content":[{"type":"output_text","text":text}]}]})
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = DialogueService(db, OpenAIResponsesAdapter("https://model.test/v1", "fixture", client=client))
+            await service.process(store.next_turn())
+    asyncio.run(scenario())
+    answer = turn_answer(store, "t")
+    assert answer.status == "failed" and answer.error_category == "ValidationError"
+    assert len(calls) == 1 and store.usage("t").model_calls == 1
+    assert db.get_run("r").status == RunStatus.PAUSED and db.get_run("r").total_calls == 0
+    assert len(db.list_runs("t")) == 1 and db.list_run_messages("r") == []
+    assert store.next_turn() is None
+
+
 def test_failed_adapter_usage_is_counted_and_later_unknown_remains_unknown(db):
     store = legacy(db)
-    model = Model([LLMError("invalid_json","redacted",usage=LLMUsage(prompt_tokens=2,total_tokens=5)),LLMError("timeout","redacted")])
+    model = Model([LLMError("invalid_json","private_raw_service_error",usage=LLMUsage(prompt_tokens=2,total_tokens=5)),LLMError("timeout","redacted")])
     service = DialogueService(db,model)
     for i in range(2):
         store.enqueue(req("input",str(i)),"t")
@@ -375,6 +458,7 @@ def test_failed_adapter_usage_is_counted_and_later_unknown_remains_unknown(db):
         assert turn_answer(store,"t").status == "failed"
         if i == 0:
             assert store.usage("t").token_usage["total_tokens"] == 5
+            assert "private_raw_service_error" not in turn_answer(store,"t").content
     assert store.usage("t").model_calls == 2 and store.usage("t").token_usage["total_tokens"] is None
 
 

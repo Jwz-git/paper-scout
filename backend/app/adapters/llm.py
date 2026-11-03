@@ -1,4 +1,5 @@
 import json
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Literal, Optional
 
@@ -26,10 +27,13 @@ class LLMResponse(BaseModel):
 class LLMError(RuntimeError):
     """外部服务或结构化输出失败；不附带密钥和原始响应。"""
 
-    def __init__(self, code: str, message: str, *, usage: Optional[LLMUsage] = None):
+    def __init__(self, code: str, message: str, *, usage: Optional[LLMUsage] = None,
+                 diagnostic: Optional[str] = None):
         super().__init__(message)
         self.code = code
         self.usage = usage
+        # 仅供代码生成的格式/位置说明；不得放入模型原文或服务错误正文。
+        self.diagnostic = diagnostic
 
 
 def _usage(data: Optional[dict], input_key: str, output_key: str, *, include_cache: bool = False) -> LLMUsage:
@@ -105,12 +109,20 @@ class BaseLLMAdapter(ABC):
             raise LLMError("no_text", "模型未返回可用文本。", usage=usage)
         parsed_json = None
         if response_format == "json_object":
+            # 只接受完整独立的JSON代码块外壳，不从正文中搜索或修补JSON。
+            fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", content.strip(), re.DOTALL | re.IGNORECASE)
+            json_text = fence.group(1) if fence else content
             try:
-                parsed_json = json.loads(content)
+                parsed_json = json.loads(json_text)
             except json.JSONDecodeError as exc:
-                raise LLMError("invalid_json", "模型结构化输出不是有效 JSON 对象。", usage=usage) from exc
+                diagnostic = ("响应不是单个完整的JSON代码块；不接受其他语言标记、缺失的围栏或块外文字。"
+                              if content.lstrip().startswith("```") and fence is None
+                              else f"JSON正文语法错误：第{exc.lineno}行，第{exc.colno}列（共{len(json_text)}字符）。")
+                raise LLMError("invalid_json", "模型结构化输出不是有效 JSON 对象。",
+                               usage=usage, diagnostic=diagnostic) from exc
             if not isinstance(parsed_json, dict):
-                raise LLMError("invalid_json", "模型结构化输出必须是 JSON 对象。", usage=usage)
+                raise LLMError("invalid_json", "模型结构化输出必须是 JSON 对象。", usage=usage,
+                               diagnostic=f"JSON顶层不是对象（类型：{type(parsed_json).__name__}）。")
         return LLMResponse(content=content, usage=usage, parsed_json=parsed_json)
 
 
@@ -174,14 +186,24 @@ class OpenAIResponsesAdapter(BaseLLMAdapter):
         usage = _usage(data.get("usage"), "input_tokens", "output_tokens")
         if data.get("status") in ("incomplete", "failed", "cancelled", "queued", "in_progress"):
             raise LLMError("incomplete", "模型响应未完成，不能用作完整结果。", usage=usage)
-        parts = []
+        parts, structured = [], None
         for item in data.get("output", []):
             if item["type"] == "message":
+                # JSON只解析最终回答；无phase/null保留协议原有行为，不从文本推断阶段。
+                if response_format == "json_object" and item.get("phase") not in (None, "final_answer"):
+                    continue
                 for part in item["content"]:
                     if part["type"] == "refusal":
                         raise LLMError("refusal", "模型拒绝生成本次内容。", usage=usage)
                     if part["type"] == "output_text":
-                        parts.append(part["text"])
+                        if response_format == "json_object":
+                            result = self._response(part["text"], usage, response_format)
+                            if structured is None:
+                                structured = result
+                        else:
+                            parts.append(part["text"])
+        if structured is not None:
+            return structured
         return self._response("".join(parts), usage, response_format)
 
 

@@ -17,6 +17,28 @@
       <a v-if="sourceLink(detail.paper.pdf_url)" :href="sourceLink(detail.paper.pdf_url)" target="_blank" rel="noopener noreferrer">原始 PDF ↗</a>
     </div>
 
+    <section class="analysis-fields">
+      <h3>字段与证据</h3>
+      <p v-if="detail.selected === false" class="muted">这篇论文保留在历史中，当前范围不再纳入。</p>
+      <p v-if="detail.selection" class="muted">{{ detail.selection.reviewed ? '筛选依据' : '尚未语义筛选' }}：{{ detail.selection.reason }}</p>
+      <template v-if="detail.analysis">
+        <p class="muted">范围修订 {{ detail.analysis.analysis_revision }} · {{ detail.analysis.status === 'completed' ? '结构化提取已保存' : '分析未完成' }}。定位校验不代表语义支持已核验。</p>
+        <p v-if="detail.analysis.error" class="error-message">分析说明：{{ detail.analysis.error }}</p>
+        <dl class="extracted-fields">
+          <div v-for="field in detail.analysis.fields" :key="field.id">
+            <dt>{{ fieldLabels[field.field_name] || field.field_name }} <small>{{ originLabels[field.origin] }}</small></dt>
+            <dd>{{ field.value ?? missingLabels[field.missing_reason || 'not_read'] }}<p v-if="field.note" class="muted">{{ field.note }}</p>
+              <button v-for="(id, index) in field.evidence_ids" :key="id" class="text-button field-evidence" @click="openEvidenceId(id)">查看依据 {{ index + 1 }}</button>
+            </dd>
+          </div>
+        </dl>
+        <details v-if="detail.analysis.ranges.length"><summary>实际提供给模型的片段</summary>
+          <p v-for="(range, index) in detail.analysis.ranges" :key="index" class="muted">{{ sourceLabels[range.source_type] }}{{ range.page_number ? `第 ${range.page_number} 页` : '' }} · 字符[{{ range.location_start }}, {{ range.location_end }}) / {{ range.original_length }}<br><code class="source-id">{{ range.source_text_id }}</code></p>
+        </details>
+      </template>
+      <p v-else class="muted">当前范围尚无结构化分析。下方已保存原文不等于模型已完成提取。</p>
+    </section>
+
     <section v-if="citation" class="citation-focus">
       <div class="section-heading"><h3>引用原文</h3><span>{{ sourceLabels[citation.source_type] }}</span></div>
       <p class="muted">{{ citation.page_number == null ? '未提供 PDF 页码' : `PDF 第 ${citation.page_number} 页` }} · 字符区间 {{ formatRange(citation.location_start, citation.location_end) }}</p>
@@ -72,6 +94,7 @@
 </template>
 
 <script setup lang="ts">
+import { fieldLabels, originLabels, missingLabels } from '../analysisLabels';
 import { computed, ref, watch } from 'vue';
 import { sourceLink, type ChatCitation, type Evidence, type PaperDetail, type SourceType } from '../api/client.ts';
 
@@ -113,6 +136,10 @@ function formatTime(value: string) { return new Date(value).toLocaleString(); }
 function formatRange(start: number | null, end: number | null) {
   return start == null || end == null ? '未提供' : `[${start}, ${end})`;
 }
+function openEvidenceId(id: string) {
+  const evidence = props.detail.evidence.find(item => item.id === id);
+  if (evidence) openEvidence(evidence);
+}
 function openEvidence(evidence: Evidence) {
   const source = props.detail.sources.find(item => item.id === evidence.source_text_id);
   if (!source) return;
@@ -121,6 +148,12 @@ function openEvidence(evidence: Evidence) {
 </script>
 
 <style scoped>
+.analysis-fields { margin-top: 28px; }
+.extracted-fields { margin: 0; }
+.extracted-fields > div { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.extracted-fields dt { display: flex; gap: 12px; align-items: baseline; color: var(--text); }
+.extracted-fields dt small { color: var(--muted); font-weight: normal; }
+.field-evidence { margin: 8px 14px 0 0; display: inline-flex; }
 .paper-detail { min-width: 0; color: var(--text); }
 h2 { margin: 20px 0 0; font-size: 18px; font-weight: 500; line-height: 1.4; }
 h3 { margin: 0 0 12px; font-size: var(--fs-section); font-weight: 500; line-height: 1.5; }

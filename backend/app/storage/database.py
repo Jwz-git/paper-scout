@@ -7,6 +7,9 @@ from typing import List, Optional
 from backend.app.config import settings
 from backend.app.domain.models import (
     Evidence,
+    Assessment,
+    PaperAnalysis,
+    PaperSelection,
     Paper,
     Report,
     Run,
@@ -214,6 +217,11 @@ class Database:
                 conn.execute("ALTER TABLE tasks ADD COLUMN title TEXT")
                 conn.execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT")
                 conn.execute("PRAGMA user_version = 3")
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 3:
+                conn.execute("ALTER TABLE reports ADD COLUMN document TEXT")
+                conn.execute("CREATE TABLE paper_analyses (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), paper_id TEXT NOT NULL REFERENCES papers(id), revision INTEGER NOT NULL, data TEXT NOT NULL)")
+                conn.execute("CREATE TABLE paper_selections (run_id TEXT NOT NULL REFERENCES runs(id), paper_id TEXT NOT NULL REFERENCES papers(id), revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id,paper_id,revision))")
+                conn.execute("PRAGMA user_version = 4")
             conn.execute("CREATE TABLE IF NOT EXISTS conversation_usage (task_id TEXT PRIMARY KEY REFERENCES tasks(id), data TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS chat_messages (id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),role TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS conversation_turns (request_scope TEXT NOT NULL,request_id TEXT NOT NULL,payload TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id),user_id TEXT NOT NULL REFERENCES chat_messages(id),assistant_id TEXT NOT NULL REFERENCES chat_messages(id),status TEXT NOT NULL,mode TEXT NOT NULL,run_id TEXT REFERENCES runs(id),paused_by_dialogue INTEGER NOT NULL DEFAULT 0,decision TEXT,PRIMARY KEY(request_scope,request_id))")
@@ -327,7 +335,7 @@ class Database:
                 conn.execute("DELETE FROM conversation_turns WHERE task_id=?", (task_id,))
                 conn.execute("DELETE FROM chat_messages WHERE task_id=?", (task_id,))
                 conn.execute("DELETE FROM conversation_usage WHERE task_id=?", (task_id,))
-                for table in ("run_messages", "reports", "events", "search_queries", "assessments", "run_sources", "run_papers", "conversation_run_states"):
+                for table in ("paper_analyses", "paper_selections", "run_messages", "reports", "events", "search_queries", "assessments", "run_sources", "run_papers", "conversation_run_states"):
                     conn.execute(f"DELETE FROM {table} WHERE run_id IN (SELECT id FROM runs WHERE task_id=?)", (task_id,))
                 conn.execute("DELETE FROM runs WHERE task_id=?", (task_id,))
                 conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
@@ -539,16 +547,20 @@ class Database:
 
     def save_report(self, report: Report) -> None:
         with self._get_connection() as conn:
-            conn.execute("INSERT INTO reports VALUES(?,?,?,?,?,?,?)", (report.id,report.run_id,report.title,report.content_markdown,json.dumps(report.gaps,ensure_ascii=False),report.stop_reason,report.created_at.isoformat()))
+            conn.execute("INSERT INTO reports(id,run_id,title,content_markdown,gaps,stop_reason,created_at,document) VALUES(?,?,?,?,?,?,?,?)", (report.id,report.run_id,report.title,report.content_markdown,json.dumps(report.gaps,ensure_ascii=False),report.stop_reason,report.created_at.isoformat(),report.document.model_dump_json() if report.document else None))
             self.record_conversation_run(self.get_run(report.run_id))
 
-    def get_report(self, run_id: str) -> Optional[Report]:
+    def get_report(self, run_id: str, report_id: Optional[str] = None) -> Optional[Report]:
         with self._get_connection() as conn:
-            r = conn.execute("SELECT * FROM reports WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+            if report_id is None:
+                r = conn.execute("SELECT * FROM reports WHERE run_id=? ORDER BY rowid DESC LIMIT 1", (run_id,)).fetchone()
+            else:
+                r = conn.execute("SELECT * FROM reports WHERE run_id=? AND id=?", (run_id, report_id)).fetchone()
             if r is None:
                 return None
             data = dict(r)
             data["gaps"] = json.loads(data["gaps"] or "[]")
+            data["document"] = json.loads(data["document"]) if data["document"] else None
             return Report.model_validate(data)
 
     def save_event(self, event):
@@ -566,6 +578,37 @@ class Database:
     def list_queries(self, run_id):
         with self._get_connection() as conn:
             return [SearchQuery.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM search_queries WHERE run_id=? ORDER BY rowid", (run_id,))]
+
+    def list_assessments(self, run_id, revision=None):
+        with self._get_connection() as conn:
+            rows = [Assessment.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM assessments WHERE run_id=? ORDER BY rowid", (run_id,))]
+            return [a for a in rows if revision is None or a.analysis_revision == revision]
+
+    def save_analysis(self, analysis):
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO paper_analyses VALUES(?,?,?,?,?)", (analysis.id, analysis.run_id, analysis.paper_id, analysis.analysis_revision, analysis.model_dump_json()))
+
+    def list_analyses(self, run_id, revision=None):
+        with self._get_connection() as conn:
+            sql, args = "SELECT data FROM paper_analyses WHERE run_id=?", [run_id]
+            if revision is not None:
+                sql += " AND revision=?"
+                args.append(revision)
+            latest = {}
+            for row in conn.execute(sql + " ORDER BY rowid", args):
+                analysis = PaperAnalysis.model_validate_json(row[0])
+                latest[analysis.paper_id] = analysis
+            return list(latest.values())
+
+    def save_selections(self, run_id, selections):
+        with self._get_connection() as conn:
+            for selection in selections:
+                conn.execute("INSERT INTO paper_selections VALUES(?,?,?,?)", (run_id, selection.paper_id, selection.analysis_revision, selection.model_dump_json()))
+                conn.execute("UPDATE run_papers SET is_selected=?,relevance_note=? WHERE run_id=? AND paper_id=?", (int(selection.relevant), selection.reason, run_id, selection.paper_id))
+
+    def list_selections(self, run_id, revision):
+        with self._get_connection() as conn:
+            return [PaperSelection.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM paper_selections WHERE run_id=? AND revision=? ORDER BY rowid", (run_id, revision))]
 
     def save_assessment(self, assessment):
         with self._get_connection() as conn:

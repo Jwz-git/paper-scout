@@ -129,7 +129,7 @@ class ConversationStore:
         with self.db._get_connection() as conn:
             return conn.execute("SELECT status FROM conversation_turns WHERE rowid=?", (turn["rowid"],)).fetchone()[0] == "processing"
 
-    def finish(self, turn, decision=None, error=None, interrupted=False):
+    def finish(self, turn, decision=None, error=None, interrupted=False, diagnostic=None):
         with self.db._get_connection() as conn:
             current = conn.execute("SELECT status FROM conversation_turns WHERE rowid=?", (turn["rowid"],)).fetchone()
             if current["status"] == "interrupted":
@@ -149,6 +149,8 @@ class ConversationStore:
                 answer.content = "用户已停止本轮对话。原始消息已保存，迟到的模型结果不会应用；已发出的调用仍可能完成并计入用量。"
             else:
                 answer.content = ("对话处理已中断，不会自动重放可能付费的调用。" if interrupted else "对话处理失败："+error+"。原始消息已保存；暂停的研究不会自动继续。")
+                if diagnostic and not interrupted:
+                    answer.content += "\n" + diagnostic
             self.save_message(answer)
 
     def stop(self, task_id):
@@ -186,7 +188,8 @@ class ConversationStore:
             if run.stop_reason:
                 content += "\n"+run.stop_reason
             if report:
-                content += "\n阶段性来源报告已保存，可在研究资料中查看；原文定位可核验，语义支持仍未核验。"
+                label = "研究报告" if run.status == RunStatus.COMPLETED else "阶段性来源报告"
+                content += f"\n{label}已保存，可在研究资料中查看；原文定位可核验，语义支持仍未核验。"
             if run.status == RunStatus.PAUSED:
                 content += "\n已保存检查点，可以在对话中继续补充或明确继续。"
             if run.gaps:

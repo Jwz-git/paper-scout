@@ -1,0 +1,13 @@
+[
+  {
+    "topic": "人工评价模板：多智能体通信",
+    "sample_kind": "artificial",
+    "report_id": "replace-with-saved-report-id",
+    "reference_paper_ids": null,
+    "retrieved_relevance": {"replace-with-paper-id": null},
+    "field_correctness": {"replace-with-extraction-id": null},
+    "citation_support": {"replace-with-claim-and-evidence-id": null},
+    "subproblem_coverage": {"通信机制": null},
+    "notes": "仅为填写模板，没有真实论文或人工复核结果。真实公开评价须改为real_public并记录选题、来源、标注范围、分歧和复核限制。"
+  }
+]

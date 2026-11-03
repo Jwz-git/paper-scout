@@ -1,9 +1,10 @@
 import asyncio
 import json
 import pytest
-from backend.app.adapters.llm import LLMResponse, LLMUsage
+from backend.app.adapters.llm import LLMError, LLMResponse, LLMUsage
 from backend.app.domain.models import Paper, Run, RunStatus, RunStage, Task, TaskInput, RunMessage
 from backend.app.storage.database import Database
+from tests.analysis_samples import analysis_response, planned
 from backend.app.workflow.engine import WorkflowEngine
 
 
@@ -33,8 +34,9 @@ class Model:
         self.requests = []
 
     async def generate(self, messages, **kwargs):
-        self.requests.append(json.loads(messages[-1].content))
-        plan = next(self.plans)
+        request = json.loads(messages[-1].content)
+        self.requests.append(request)
+        plan = analysis_response(request) if "operation" in request else planned(next(self.plans))
         return LLMResponse(content=json.dumps(plan),parsed_json=plan,
                            usage=LLMUsage(prompt_tokens=3,completion_tokens=4,total_tokens=7))
 
@@ -75,6 +77,24 @@ def test_empty_results_fail_without_a_fake_report(store):
     assert store.get_report("r") is None
 
 
+def test_planning_json_failure_keeps_safe_diagnostic_and_usage(store):
+    make_run(store)
+    search = Search()
+    diagnostic = "JSON语法错误：第1行，第1列（共20字符）。"
+    class FailingModel:
+        async def generate(self, *args, **kwargs):
+            raise LLMError("invalid_json", "private_raw_service_error",
+                           usage=LLMUsage(prompt_tokens=5, completion_tokens=7, total_tokens=12), diagnostic=diagnostic)
+    engine = WorkflowEngine(store, arxiv_adapter=search, llm_adapter=FailingModel())
+    final = asyncio.run(engine.execute_run("r"))
+    assert final.status == RunStatus.FAILED
+    assert final.total_calls == final.model_calls == 1 and final.token_usage["total_tokens"] == 12
+    assert not search.calls and store.get_report("r") is None
+    assert diagnostic in final.stop_reason and "private_raw_service_error" not in final.stop_reason
+    errors = [event for event in store.list_events("r") if event.category == "service_error"]
+    assert len(errors) == 1 and errors[0].message == final.stop_reason
+
+
 def test_pause_after_first_request_preserves_cursor_and_results(store):
     make_run(store)
     model = Model([{"queries":["all:agent","all:planning"],"subproblems":["planning"]}])
@@ -95,7 +115,7 @@ def test_pause_after_first_request_preserves_cursor_and_results(store):
         store.transition("r",[RunStatus.PAUSED],RunStatus.QUEUED)
         resumed = await engine.execute_run("r")
         assert len(search.calls) == 2  # 已完成的查询不重放。
-        assert resumed.total_calls == before + 1
+        assert resumed.total_calls == before + 5  # 剩余检索、筛选、两篇提取、综合；没有重放。
     # 单轮结束无需第二次模型规划。
     r=store.get_run("r"); r.max_rounds=1; store.update_run(r)
     asyncio.run(scenario())
@@ -116,7 +136,7 @@ def test_supplements_require_processing_and_preserve_initial_scope(store):
     assert {p.id for p in store.get_papers_by_run("r")} == {"old","new"}
     assert {p.id for p in store.get_papers_by_run("r",selected_only=True)} == {"new"}
     assert store.list_run_messages("r")[0].status == "processed"
-    assert final.token_usage["total_tokens"] == 7
+    assert final.token_usage["total_tokens"] == 28  # 规划、筛选、提取、综合各一次。
 
 
 def test_without_model_supplement_is_not_silently_ignored(store):
@@ -201,7 +221,7 @@ def test_repeated_model_queries_with_date_filters_stop(store):
     final=asyncio.run(WorkflowEngine(store,arxiv_adapter=search,llm_adapter=model).execute_run("r"))
     assert final.status == RunStatus.PARTIAL
     assert len(search.calls)==1 and "新查询" in final.stop_reason
-    assert final.total_calls==3
+    assert final.total_calls==7
 
 
 def test_pause_waiting_time_is_not_execution_time(store,monkeypatch):

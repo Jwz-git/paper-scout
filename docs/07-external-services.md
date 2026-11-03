@@ -37,6 +37,22 @@
 
 实际价格、注册条件、服务可达性与课题检索质量须随用户所选服务独立核验。PDF 子进程隔离和时限不是完整内存资源沙箱；复杂表格和大压缩内容仍需受控样本人工评估。
 
+## Responses分阶段输出与JSON失败
+
+2026-11-03通过Context7核对 [OpenAI官方SDK解析说明](https://github.com/openai/openai-python/blob/main/helpers.md)：结构化解析只处理 `phase="final_answer"` 或未提供／为null的phase；`commentary`和其他显式阶段不是最终结构化答案，不能因其内容恰好是JSON而作为回退。普通 `output_text` 拼接仍可包含过程说明，不能把它直接当结构化解析结果。
+
+本项目的Responses JSON模式逐个校验符合上述阶段规则的文本块，返回第一个合法结果；后续最终文本块无效或拒绝时仍按失败处理，不将多个JSON对象拼接为一个。无最终文本报 `no_text`；不从内容或型号猜测缺失phase。普通文本模式保留原有拼接行为。
+
+JSON对象模式在统一输出入口接受裸JSON对象，或仅由一个完整三反引号代码块包裹的JSON对象。代码块语言标记仅允许 `json`（不区分大小写）或省略，支持LF／CRLF换行；只去掉外壳，不改写JSON正文。带块外说明、多段代码块、不完整围栏、其他语言标记、语法错误或非对象顶层仍然失败，不从正文中搜索大括号或补造字段。归一化后仍由调用方校验业务字段、固定动作及引用范围；这属于本项目针对已观察到的返回格式所做的处理，不表示供应商原生JSON模式符合协议。
+
+`invalid_json`错误类别保持不变。应用可展示代码生成的安全诊断：代码围栏格式不受支持、JSON正文语法错误行列与字符数、或顶层类型不是对象；不展示或保存响应片段、字段值、服务错误正文或密钥。诊断不会自动修补JSON、切换协议或重发调用。错误消息本身不足以确定供应商兼容性，仍须区分离线反例和真实服务复验。
+
+## 本地报告导出依赖
+
+2026-11-03核验 [python-docx文档](https://python-docx.readthedocs.io/en/latest/)、[ReportLab字体](https://docs.reportlab.com/reportlab/userguide/ch3_fonts/)与[表格](https://docs.reportlab.com/reportlab/userguide/ch7_tables/)；使用文档/表格API与嵌入TrueType字体，不依赖在线转换服务。当前Python 3.9环境实际使用python-docx 1.2.0和ReportLab 4.5.1；ReportLab 5.1.0导入要求Python 3.10+，因此依赖上界限制在5之前，而非宣称最新版兼容。
+
+PDF字体来自 [Google Fonts的ZCOOL XiaoWei](https://github.com/google/fonts/tree/main/ofl/zcoolxiaowei)，原字体与OFL 1.1许可保存在 `backend/app/assets/fonts/`。许可允许随软件分发及嵌入文档；保留版权和许可，不单独销售字体。中文/跨页表格使用受控人工样例验证，不等同于任意科研符号、公式或复杂版面都已验收。
+
 ## 模型列表接口
 
 2026-11-03核验：[OpenAI模型列表](https://developers.openai.com/api/reference/resources/models/methods/list)为GET `/models`，返回`data`模型清单，使用Bearer凭据；Chat Completions与Responses配置共用此列表入口。[Anthropic模型列表](https://platform.claude.com/docs/en/api/models/list)为GET `/v1/models`，返回`data/has_more/last_id`，以`after_id`继续分页。本项目的服务地址已包含用户提供的API前缀，因此只追加`/models`。

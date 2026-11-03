@@ -13,5 +13,9 @@ python-dotenv>=1.0.1
 # 文献解析 (按页提取 PDF 文本)
 pypdf>=4.3.0
 
+# 报告导出（ReportLab 5 需要 Python 3.10+）
+python-docx>=1.2.0,<2
+reportlab>=4.5.1,<5
+
 # 测试
 pytest>=8.3.0

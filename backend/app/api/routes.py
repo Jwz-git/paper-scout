@@ -191,30 +191,68 @@ async def papers(run_id: str, db=Depends(get_db)):
 
 @router.get("/runs/{run_id}/papers/{paper_id}")
 async def paper_detail(run_id: str, paper_id: str, db=Depends(get_db)):
-    require_run(db, run_id)
+    run = require_run(db, run_id)
     paper = next((p for p in db.get_papers_by_run(run_id) if p.id==paper_id), None)
     if paper is None:
         raise HTTPException(404, "本次运行中不存在该论文")
-    return {"paper":paper,"sources":db.get_source_texts(paper_id,run_id),"evidence":db.get_evidence(paper_id,run_id)}
+    analysis = next((a for a in db.list_analyses(run_id, run.analysis_revision) if a.paper_id == paper_id), None)
+    selection = next((s for s in db.list_selections(run_id, run.analysis_revision) if s.paper_id == paper_id), None)
+    return {"paper":paper,"sources":db.get_source_texts(paper_id,run_id),"evidence":db.get_evidence(paper_id,run_id),
+        "analysis":analysis,"selection":selection,"analysis_revision":run.analysis_revision,
+        "selected":paper_id in {p.id for p in db.get_papers_by_run(run_id, selected_only=True)}}
 
 
-def require_report(db, run_id):
+@router.get("/runs/{run_id}/analysis")
+async def run_analysis(run_id: str, revision: Optional[int] = Query(None, ge=1), db=Depends(get_db)):
     run = require_run(db, run_id)
-    report = db.get_report(run_id)
+    revision = revision or run.analysis_revision
+    if revision != run.analysis_revision and revision not in run.scope_history:
+        raise HTTPException(404, "分析修订不存在")
+    assessments = db.list_assessments(run_id, revision)
+    return {"analysis_revision":revision, "scope":run.scope_history.get(revision, run.current_input),
+        "papers":db.get_papers_by_run(run_id), "selections":db.list_selections(run_id, revision),
+        "analyses":db.list_analyses(run_id, revision), "assessment":assessments[-1] if assessments else None}
+
+
+def require_report(db, run_id, report_id=None):
+    run = require_run(db, run_id)
+    report = db.get_report(run_id, report_id)
     if report is None:
+        if report_id is not None:
+            raise HTTPException(404, "本次运行中不存在该报告版本")
         raise HTTPException(409, {"message":"本次运行尚无可交付报告", "status":run.status.value})
     return report
 
 
 @router.get("/runs/{run_id}/report")
-async def report(run_id: str, db=Depends(get_db)):
-    return require_report(db, run_id)
+async def report(run_id: str, report_id: Optional[str] = None, db=Depends(get_db)):
+    return require_report(db, run_id, report_id)
 
 
 @router.get("/runs/{run_id}/report.md")
-async def report_markdown(run_id: str, db=Depends(get_db)):
-    report = require_report(db, run_id)
+async def report_markdown(run_id: str, report_id: Optional[str] = None, db=Depends(get_db)):
+    report = require_report(db, run_id, report_id)
     return Response(report.content_markdown,media_type="text/markdown; charset=utf-8",headers={"Content-Disposition":'attachment; filename="paper-scout-report.md"'})
+
+
+def rendered_report(db, run_id, report_id, format):
+    from backend.app import reports
+    report = require_report(db, run_id, report_id)
+    if report.document is None:
+        raise HTTPException(409, "历史报告只有Markdown；没有可供多格式导出的结构化快照")
+    content = reports.word(report) if format == "docx" else reports.pdf(report)
+    media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if format == "docx" else "application/pdf"
+    return Response(content, media_type=media, headers={"Content-Disposition":f'attachment; filename="paper-scout-report.{format}"', "Cache-Control":"no-store"})
+
+
+@router.get("/runs/{run_id}/report.docx")
+def report_word(run_id: str, report_id: Optional[str] = None, db=Depends(get_db)):
+    return rendered_report(db, run_id, report_id, "docx")
+
+
+@router.get("/runs/{run_id}/report.pdf")
+def report_pdf(run_id: str, report_id: Optional[str] = None, db=Depends(get_db)):
+    return rendered_report(db, run_id, report_id, "pdf")
 
 
 @router.get("/conversations", response_model=List[Task])

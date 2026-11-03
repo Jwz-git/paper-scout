@@ -195,7 +195,7 @@ class DialogueService:
             raise
         except (LLMError,ValidationError,DialogueError,StateConflict,httpx.HTTPError,asyncio.TimeoutError) as exc:
             category = getattr(exc,"code", str(exc) if isinstance(exc,DialogueError) else type(exc).__name__)
-            self.store.finish(turn,error=category)
+            self.store.finish(turn,error=category,diagnostic=exc.diagnostic if isinstance(exc,LLMError) else None)
         except Exception as exc:
             self.store.finish(turn,error=type(exc).__name__)
             raise

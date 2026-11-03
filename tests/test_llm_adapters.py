@@ -95,12 +95,117 @@ def test_optional_parameters_omitted_and_unknown_usage_stays_unknown(adapter_typ
     assert response.usage.model_dump() == {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
 
 
-@pytest.mark.parametrize("text", ["invalid JSON", "[]", '```json\n{"x":1}\n```'])
+@pytest.mark.parametrize("text", ["invalid JSON", "[]"])
 @pytest.mark.parametrize("adapter_type", ADAPTERS)
 def test_invalid_structured_output_is_failure_not_empty_success(adapter_type, text):
     with pytest.raises(LLMError) as error:
         call_mock(adapter_type, payload_for(adapter_type, text), response_format="json_object")
     assert error.value.code == "invalid_json"
+
+
+@pytest.mark.parametrize("adapter_type", ADAPTERS)
+@pytest.mark.parametrize("language, newline", [("json", "\n"), ("", "\n"), ("JSON", "\r\n")])
+def test_single_complete_json_fence_is_unwrapped(adapter_type, language, newline):
+    expected = {"summary": "中文中的 ``` 保留", "value": 1}
+    text = " \n```" + language + newline + json.dumps(expected, ensure_ascii=False) + newline + "```\n"
+    response = call_mock(adapter_type, payload_for(adapter_type, text), response_format="json_object")
+    assert response.parsed_json == expected
+    assert response.content == text
+
+
+@pytest.mark.parametrize("text", [
+    '```json\n{"x":1}\n',
+    'Before\n```json\n{"x":1}\n```',
+    '```json\n{"x":1}\n```\nAfter',
+    '```json\n{"x":1}\n```\n```json\n{"y":2}\n```',
+    '```python\n{"x":1}\n```',
+    '```json\n{"x":1,}\n```',
+    '```json\n[]\n```',
+])
+def test_fence_unwrapping_does_not_extract_or_repair_json(text):
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload_for(OpenAIResponsesAdapter, text), response_format="json_object")
+    assert error.value.code == "invalid_json"
+
+
+def test_plain_text_keeps_json_code_fence():
+    text = '```json\n{"x":1}\n```'
+    response = call_mock(OpenAIResponsesAdapter, payload_for(OpenAIResponsesAdapter, text))
+    assert response.content == text and response.parsed_json is None
+
+
+@pytest.mark.parametrize("commentary", ["Preparing the answer.", '{"action":"cancel"}'])
+@pytest.mark.parametrize("phase", [None, "final_answer"])
+def test_responses_json_uses_final_answer_not_commentary(commentary, phase):
+    payload = payload_for(OpenAIResponsesAdapter, '{"action":"clarify"}', {"input_tokens": 5, "output_tokens": 7})
+    payload["output"][-1]["phase"] = phase
+    payload["output"].insert(1, {"type": "message", "phase": "commentary", "content": [
+        {"type": "output_text", "text": commentary}]})
+    response = call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+    assert response.parsed_json == {"action": "clarify"}
+    assert response.content == '{"action":"clarify"}'
+    assert response.usage.total_tokens == 12
+
+
+def test_responses_commentary_alone_is_not_a_structured_answer():
+    payload = payload_for(OpenAIResponsesAdapter, '{"action":"cancel"}')
+    payload["output"][-1]["phase"] = "commentary"
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+    assert error.value.code == "no_text"
+
+
+@pytest.mark.parametrize("final_part, code", [
+    ({"type": "refusal", "refusal": "declined"}, "refusal"),
+    ({"type": "output_text", "text": "invalid JSON"}, "invalid_json"),
+])
+def test_responses_invalid_final_does_not_fall_back_to_commentary(final_part, code):
+    payload = {"status": "completed", "output": [
+        {"type": "message", "phase": "commentary", "content": [{"type": "output_text", "text": '{"action":"cancel"}'}]},
+        {"type": "message", "phase": "final_answer", "content": [final_part]},
+    ]}
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+    assert error.value.code == code
+
+
+@pytest.mark.parametrize("second_text", ['{"answer":2}', "invalid JSON"])
+def test_responses_structured_blocks_are_validated_separately(second_text):
+    payload = payload_for(OpenAIResponsesAdapter, '{"answer":1}')
+    payload["output"][-1]["content"].append({"type": "output_text", "text": second_text})
+    if second_text == "invalid JSON":
+        with pytest.raises(LLMError) as error:
+            call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+        assert error.value.code == "invalid_json"
+    else:
+        response = call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+        assert response.parsed_json == {"answer": 1}
+        assert response.content == '{"answer":1}'
+
+
+def test_responses_plain_text_still_includes_commentary():
+    payload = payload_for(OpenAIResponsesAdapter, "Final answer.")
+    payload["output"].insert(1, {"type": "message", "phase": "commentary", "content": [
+        {"type": "output_text", "text": "Preparing. "}]})
+    response = call_mock(OpenAIResponsesAdapter, payload)
+    assert response.content == "Preparing. Final answer."
+    assert response.parsed_json is None
+
+
+@pytest.mark.parametrize("text, diagnostic", [
+    ('```json\n{"private_marker":true}', "JSON代码块"),
+    ('```json\n{"private_marker": }\n```', "JSON正文语法错误"),
+    ('{\n"private_marker":\n}', "第3行"),
+    ('["private_marker"]', "顶层"),
+])
+def test_json_failure_diagnostic_does_not_include_response_text(text, diagnostic):
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload_for(OpenAIResponsesAdapter, text,
+                  {"input_tokens": 5, "output_tokens": 7}), response_format="json_object")
+    assert error.value.code == "invalid_json"
+    assert diagnostic in error.value.diagnostic
+    assert "private_marker" not in error.value.diagnostic + str(error.value)
+    assert error.value.usage.total_tokens == 12
 
 
 def test_responses_sdk_shortcut_and_wrong_content_type_are_not_wire_protocol():
