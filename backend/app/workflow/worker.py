@@ -1,14 +1,16 @@
-"""本地单进程串行执行器：数据库保存队列，不用每请求 BackgroundTasks。"""
+"""本地单进程串行执行器：持久队列，不用每请求 BackgroundTasks。"""
 import asyncio
 import logging
 from backend.app.domain.models import RunStatus
+from backend.app.dialogue import DialogueService
 
 logger = logging.getLogger(__name__)
 
 
 class SerialWorker:
-    def __init__(self, db, engine):
+    def __init__(self, db, engine, dialogue=None):
         self.db, self.engine = db, engine
+        self.dialogue = dialogue if dialogue is not None else DialogueService(db,getattr(engine,"llm",None))
         self.wake = asyncio.Event()
 
     def notify(self):
@@ -16,17 +18,22 @@ class SerialWorker:
 
     async def serve(self):
         self.db.interrupt_running()
+        self.dialogue.store.interrupt_processing()
         while True:
             self.wake.clear()
-            queued = self.db.list_runs(status=RunStatus.QUEUED)
-            if not queued:
+            # 每轮重新读，不能让旧的待运行列表饿死刚收到的对话。
+            turn = self.dialogue.store.next_turn()
+            queued = self.db.list_runs(status=RunStatus.QUEUED) if turn is None else []
+            if turn is None and not queued:
                 await self.wake.wait()
                 continue
-            for run in queued:
-                try:
-                    await self.engine.execute_run(run.id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    # engine 已持久化程序错误；日志仅记类别，避免原文／凭据泄漏。
-                    logger.error("运行 %s 程序错误：%s", run.id, type(exc).__name__)
+            try:
+                if turn is not None:
+                    await self.dialogue.process(turn)
+                else:
+                    await self.engine.execute_run(queued[0].id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # 服务已持久化程序错误；只记类别，不泄漏原文或凭据。
+                logger.error("串行执行程序错误：%s", type(exc).__name__)

@@ -1,6 +1,20 @@
 # 数据与接口草案
 
-状态：供实施讨论，不代表现有接口。时间统一保存 UTC，界面按用户本地时间显示；标识由系统生成，外部来源 ID 原样保留。
+状态：下方保留目标实体与接口草案；2026-11-03 新增的实际会话接口单列说明，草案中的 PATCH、模型配置和 Word／PDF 不代表已实现。时间统一保存 UTC，界面按用户本地时间显示；标识由系统生成，外部来源 ID 原样保留。
+
+## 实际会话接口
+
+- `GET /api/conversations`：历史会话（复用 Task 列表）。
+- `POST /api/conversations`：提交首条自然语言消息，创建会话并排队，返回 `202`。
+- `GET /api/conversations/{task_id}`：任务、真实消息、所有运行、对话用量、busy 和模型是否配置。
+- `POST /api/conversations/{task_id}/messages`：追加并排队消息，返回 `202`。默认 `mode=auto`；`research/ask/pause/resume/cancel` 是显式覆盖，不是强制交互步骤。
+- `POST /api/conversations/{task_id}/stop`：直接停止当前工作，返回 `200` 会话视图；无需模型或请求体。中断排队／处理中的对话并取消活动研究，即使尚无 Run 也可停止；迟到模型结果不能重启工作，重复停止无新增副作用。
+
+提交包含 `content` 和 `request_id`。同一请求标识及内容重发返回已保存会话，不重复执行；冲突复用或同会话已有待处理消息返回 `409`。首条文本最多2000字符，后续最多4000字符；接口本身不发起外部服务调用。
+
+`ChatMessage` 保存角色、文本、状态（queued、processing、completed、failed、interrupted）、实际动作、所属 Run、时间、错误类别和引用。`ChatCitation` 保存运行／论文／快照标识、读取类型、来源链接、页码、精确原文及字符区间。原文匹配不等于语义支持核验。
+
+对话与研究用量分别显示，研究 Run 的既有限制不变；消息失败不会伪造助手回答或回滚掉用户消息。旧任务和旧运行保留，不把旧研究输入伪造成新助手发言。详细语义见 [对话交互修复](<09-conversation-interface.md>)。
 
 ## 核心实体
 

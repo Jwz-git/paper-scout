@@ -32,8 +32,10 @@ def create_app(config=None, db=None, engine=None, run_worker=True):
             runner = WorkflowEngine(store, arxiv_adapter=ArXivAdapter(user_agent=cfg.arxiv_user_agent,rate_limit_seconds=cfg.arxiv_rate_limit_seconds),llm_adapter=llm)
         else:
             runner = engine
+        from backend.app.dialogue import DialogueService
         app.state.engine = runner
-        app.state.worker = SerialWorker(store, runner) if run_worker else None
+        app.state.dialogue = DialogueService(store, getattr(runner, "llm", None))
+        app.state.worker = SerialWorker(store, runner, app.state.dialogue) if run_worker else None
         job = asyncio.create_task(app.state.worker.serve()) if run_worker else None
         try:
             yield

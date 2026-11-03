@@ -2,6 +2,63 @@ export interface HealthResponse {
   status: string;
   app: string;
   version: string;
+  model_configured?: boolean;
+}
+
+export interface TokenUsage {
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+}
+
+export type ChatMode = "auto" | "research" | "ask" | "pause" | "resume" | "cancel";
+export type ChatStatus = "queued" | "processing" | "completed" | "failed" | "interrupted";
+export type SourceType = "metadata" | "abstract" | "fulltext";
+
+export interface ChatCitation {
+  source_text_id: string;
+  paper_id: string;
+  run_id: string;
+  source_type: SourceType;
+  source_url?: string | null;
+  page_number?: number | null;
+  quote: string;
+  location_start: number | null;
+  location_end: number | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  task_id: string;
+  role: "user" | "assistant";
+  content: string;
+  status: ChatStatus;
+  action?: "research" | "answer" | "clarify" | "pause" | "resume" | "cancel" | null;
+  run_id?: string | null;
+  citations: ChatCitation[];
+  created_at: string;
+  error_category?: string | null;
+}
+
+export interface ConversationView {
+  task: Task;
+  messages: ChatMessage[];
+  runs: Run[];
+  usage: {
+    model_calls: number;
+    total_execution_seconds: number;
+    max_calls: number;
+    max_seconds: number;
+    token_usage: TokenUsage;
+  };
+  busy: boolean;
+  model_configured: boolean;
+}
+
+export interface ChatRequest {
+  content: string;
+  mode: ChatMode;
+  request_id: string;
 }
 
 export interface Task {
@@ -22,6 +79,10 @@ export interface Run {
   id: string;
   task_id: string;
   initial_topic: string;
+  initial_input?: Omit<Task, "id" | "created_at" | "updated_at"> | null;
+  current_input?: Omit<Task, "id" | "created_at" | "updated_at"> | null;
+  model_calls?: number;
+  token_usage?: TokenUsage;
   status: RunStatus;
   stage: RunStage;
   current_round: number;
@@ -63,6 +124,39 @@ export interface Paper {
   url: string;
   pdf_url?: string | null;
   abstract?: string | null;
+  doi?: string | null;
+  source?: string;
+  source_id?: string;
+  primary_category?: string | null;
+  categories?: string[];
+  fetched_at?: string;
+}
+
+export interface SourceText {
+  id: string;
+  paper_id: string;
+  source_type: SourceType;
+  source_url?: string | null;
+  page_number?: number | null;
+  content: string;
+  status: string;
+  fetched_at: string;
+}
+
+export interface Evidence {
+  id: string;
+  source_text_id: string;
+  paper_id: string;
+  page_number?: number | null;
+  quote: string;
+  location_start: number | null;
+  location_end: number | null;
+}
+
+export interface PaperDetail {
+  paper: Paper;
+  sources: SourceText[];
+  evidence: Evidence[];
 }
 
 export interface Report {
@@ -112,6 +206,43 @@ async function request(path: string, options: RequestInit = {}): Promise<Respons
 
 export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse> {
   return (await request("/health", { signal })).json();
+}
+
+export async function getConversations(signal?: AbortSignal): Promise<Task[]> {
+  return (await request("/conversations", { signal })).json();
+}
+
+export async function getConversation(taskId: string, signal?: AbortSignal): Promise<ConversationView> {
+  return (await request(`/conversations/${encodeURIComponent(taskId)}`, { signal })).json();
+}
+
+export async function sendConversationMessage(taskId: string | null, payload: ChatRequest, signal?: AbortSignal): Promise<ConversationView> {
+  const path = taskId ? `/conversations/${encodeURIComponent(taskId)}/messages` : "/conversations";
+  return (await request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  })).json();
+}
+
+export async function stopConversation(taskId: string, signal?: AbortSignal): Promise<ConversationView> {
+  return (await request(`/conversations/${encodeURIComponent(taskId)}/stop`, { method: "POST", signal })).json();
+}
+
+export async function getPaperDetail(runId: string, paperId: string, signal?: AbortSignal): Promise<PaperDetail> {
+  return (await request(`/runs/${encodeURIComponent(runId)}/papers/${encodeURIComponent(paperId)}`, { signal })).json();
+}
+
+// 论文链接是外部输入，只允许浏览器打开 HTTP(S)，避免 javascript: 等可执行地址。
+export function sourceLink(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function getTasks(signal?: AbortSignal): Promise<Task[]> {

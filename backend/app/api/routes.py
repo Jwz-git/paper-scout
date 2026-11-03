@@ -1,7 +1,10 @@
 from uuid import uuid4
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from backend.app.domain.models import Task, TaskInput, Run, RunMessage
+from backend.app.domain.conversation import ConversationCreateRequest, ConversationMessageRequest, ConversationView
+from backend.app.storage.conversations import ConversationStore
 from backend.app.services import RunService
 from backend.app.storage.database import Database, StateConflict
 
@@ -147,3 +150,40 @@ async def report(run_id: str, db=Depends(get_db)):
 async def report_markdown(run_id: str, db=Depends(get_db)):
     report = require_report(db, run_id)
     return Response(report.content_markdown,media_type="text/markdown; charset=utf-8",headers={"Content-Disposition":'attachment; filename="paper-scout-report.md"'})
+
+
+@router.get("/conversations", response_model=List[Task])
+async def conversations(limit: int = Query(50, ge=1, le=100), db=Depends(get_db)):
+    return db.list_tasks(limit)
+
+
+@router.post("/conversations", response_model=ConversationView, status_code=202)
+async def create_conversation(req: ConversationCreateRequest, request: Request, db=Depends(get_db)):
+    store = ConversationStore(db)
+    task_id = perform(lambda: store.enqueue(req))
+    signal(request)
+    return store.view(task_id, request.app.state.dialogue.llm is not None)
+
+
+@router.get("/conversations/{task_id}", response_model=ConversationView)
+async def conversation(task_id: str, request: Request, db=Depends(get_db)):
+    require_task(db, task_id)
+    return ConversationStore(db).view(task_id, request.app.state.dialogue.llm is not None)
+
+
+@router.post("/conversations/{task_id}/messages", response_model=ConversationView, status_code=202)
+async def conversation_message(task_id: str, req: ConversationMessageRequest, request: Request, db=Depends(get_db)):
+    require_task(db, task_id)
+    store = ConversationStore(db)
+    perform(lambda: store.enqueue(req, task_id))
+    signal(request)
+    return store.view(task_id, request.app.state.dialogue.llm is not None)
+
+
+@router.post("/conversations/{task_id}/stop", response_model=ConversationView)
+async def stop_conversation(task_id: str, request: Request, db=Depends(get_db)):
+    require_task(db, task_id)
+    store = ConversationStore(db)
+    store.stop(task_id)
+    signal(request)
+    return store.view(task_id, request.app.state.dialogue.llm is not None)

@@ -116,6 +116,7 @@ class RunMessage(BaseModel):
     content: str
     status: str = "pending"
     impact_summary: Optional[str] = None
+    proposed_scope: Optional[TaskInput] = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

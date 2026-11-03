@@ -190,7 +190,7 @@ class WorkflowEngine:
         self._save(run)
 
     async def _plan(self, run, pending):
-        scope = run.current_input or run.initial_input
+        scope = next((m.proposed_scope for m in reversed(pending) if m.proposed_scope is not None), None) or run.current_input or run.initial_input
         history = self.db.get_papers_by_run(run.id)
         if self.llm is None:
             if pending:

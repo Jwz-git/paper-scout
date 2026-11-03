@@ -207,6 +207,13 @@ class Database:
             conn.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), data TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS search_queries (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), data TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS assessments (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), data TEXT NOT NULL)")
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 1:
+                conn.execute("ALTER TABLE run_messages ADD COLUMN proposed_scope TEXT")
+                conn.execute("PRAGMA user_version = 2")
+            conn.execute("CREATE TABLE IF NOT EXISTS conversation_usage (task_id TEXT PRIMARY KEY REFERENCES tasks(id), data TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS chat_messages (id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),role TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS conversation_turns (request_scope TEXT NOT NULL,request_id TEXT NOT NULL,payload TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id),user_id TEXT NOT NULL REFERENCES chat_messages(id),assistant_id TEXT NOT NULL REFERENCES chat_messages(id),status TEXT NOT NULL,mode TEXT NOT NULL,run_id TEXT REFERENCES runs(id),paused_by_dialogue INTEGER NOT NULL DEFAULT 0,decision TEXT,PRIMARY KEY(request_scope,request_id))")
+            conn.execute("CREATE TABLE IF NOT EXISTS conversation_run_states (run_id TEXT PRIMARY KEY REFERENCES runs(id),signature TEXT NOT NULL)")
 
     # --- Task 操作 ---
     def create_task(self, task: Task) -> None:
@@ -277,6 +284,10 @@ class Database:
             conn.execute("INSERT INTO runs(id,task_id,initial_topic,status,stage,created_at,details) VALUES(?,?,?,?,?,?,?)", (run.id,run.task_id,run.initial_topic,run.status.value,run.stage.value,run.created_at.isoformat(),run.model_dump_json()))
             self.update_run(run)
 
+    def record_conversation_run(self, run):
+        from backend.app.storage.conversations import ConversationStore
+        ConversationStore(self).record_run(run)
+
     @staticmethod
     def _run_from_row(row):
         data = json.loads(row["details"])
@@ -316,9 +327,12 @@ class Database:
             elif row["status"] == "pause_requested" and run.status not in (RunStatus.PAUSED,RunStatus.INTERRUPTED,RunStatus.FAILED):
                 run.status = RunStatus.PAUSE_REQUESTED
             conn.execute("UPDATE runs SET status=?,stage=?,current_round=?,max_rounds=?,max_calls=?,total_calls=?,total_execution_seconds=?,stop_reason=?,started_at=?,ended_at=?,details=? WHERE id=?", (run.status.value,run.stage.value,run.current_round,run.max_rounds,run.max_calls,run.total_calls,run.total_execution_seconds,run.stop_reason,run.started_at.isoformat() if run.started_at else None,run.ended_at.isoformat() if run.ended_at else None,run.model_dump_json(),run.id))
+            self.record_conversation_run(run)
 
-    def pause_run(self, run_id):
-        with self._get_connection():
+    def pause_run(self, run_id, dialogue=False):
+        with self._get_connection() as conn:
+            if not dialogue:
+                conn.execute("UPDATE conversation_turns SET paused_by_dialogue=0 WHERE run_id=? AND status IN ('queued','processing')", (run_id,))
             run = self.get_run(run_id)
             if run is None:
                 raise ValueError("运行不存在")
@@ -335,8 +349,8 @@ class Database:
                 raise ValueError("运行不存在")
             if run.status == RunStatus.CANCELLED:
                 return run
-            self.transition(run_id,[RunStatus.QUEUED,RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED,RunStatus.PAUSED,RunStatus.NEEDS_INPUT],RunStatus.CANCELLED)
             conn.execute("UPDATE runs SET stop_reason='用户取消',ended_at=? WHERE id=?", (utc_now().isoformat(),run_id))
+            self.transition(run_id,[RunStatus.QUEUED,RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED,RunStatus.PAUSED,RunStatus.NEEDS_INPUT],RunStatus.CANCELLED)
             return self.get_run(run_id)
 
     def add_message_if_paused(self, msg):
@@ -352,19 +366,29 @@ class Database:
             changed = conn.execute(f"UPDATE runs SET status=? WHERE id=? AND status IN ({placeholders})", [target.value,run_id,*[s.value for s in expected]]).rowcount
             if not changed:
                 raise StateConflict("当前运行状态不允许此操作")
-            return self.get_run(run_id)
+            run = self.get_run(run_id)
+            self.record_conversation_run(run)
+            return run
 
     def interrupt_running(self):
         with self._get_connection() as conn:
+            interrupted = [r.id for r in self.list_runs() if r.status in (RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED)]
             conn.execute("UPDATE runs SET status='interrupted',stop_reason='执行进程中断；不会自动重复外部调用',ended_at=? WHERE status IN ('running','pause_requested')", (utc_now().isoformat(),))
+            for run_id in interrupted:
+                self.record_conversation_run(self.get_run(run_id))
 
     def save_run_message(self, msg: RunMessage) -> None:
         with self._get_connection() as conn:
-            conn.execute("INSERT INTO run_messages VALUES(?,?,?,?,?,?)", (msg.id,msg.run_id,msg.content,msg.status,msg.impact_summary,msg.created_at.isoformat()))
+            conn.execute("INSERT INTO run_messages(id,run_id,content,status,impact_summary,created_at,proposed_scope) VALUES(?,?,?,?,?,?,?)", (msg.id,msg.run_id,msg.content,msg.status,msg.impact_summary,msg.created_at.isoformat(),msg.proposed_scope.model_dump_json() if msg.proposed_scope else None))
 
     def list_run_messages(self, run_id: str) -> List[RunMessage]:
         with self._get_connection() as conn:
-            return [RunMessage.model_validate(dict(r)) for r in conn.execute("SELECT * FROM run_messages WHERE run_id=? ORDER BY created_at,id", (run_id,))]
+            messages = []
+            for row in conn.execute("SELECT * FROM run_messages WHERE run_id=? ORDER BY created_at,id", (run_id,)):
+                data = dict(row)
+                data["proposed_scope"] = json.loads(data["proposed_scope"]) if data["proposed_scope"] else None
+                messages.append(RunMessage.model_validate(data))
+            return messages
 
     def apply_plan(self, run, messages, keep_paper_ids=None):
         with self._get_connection() as conn:
@@ -445,6 +469,7 @@ class Database:
     def save_report(self, report: Report) -> None:
         with self._get_connection() as conn:
             conn.execute("INSERT INTO reports VALUES(?,?,?,?,?,?,?)", (report.id,report.run_id,report.title,report.content_markdown,json.dumps(report.gaps,ensure_ascii=False),report.stop_reason,report.created_at.isoformat()))
+            self.record_conversation_run(self.get_run(report.run_id))
 
     def get_report(self, run_id: str) -> Optional[Report]:
         with self._get_connection() as conn:
