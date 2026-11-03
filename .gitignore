@@ -55,8 +55,8 @@ pnpm-debug.log*
 .cache/
 *.log
 
-# 本地 Claude 入口，协作规范以 AGENTS.md 为准
 /CLAUDE.md
 
-# 保留依赖锁文件、.python-version、docs、tests/fixtures 和共享编辑器配置
-# 忽略规则不会自动移除已跟踪文件；提交前仍需核对暂存范围
+.agents/
+.taste-skill/
+changelog/

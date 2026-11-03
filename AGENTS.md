@@ -66,6 +66,7 @@
 - 中文用于文档、界面说明与必要注释；代码标识符采用清晰一致的英文。对外结构化数据有类型和明确的缺失语义。
 - 不提交密钥、用户研究资料、原始运行日志、下载论文或模型原始响应。固定脱敏样本与经过许可的示例材料放入受版本管理的目录。
 - 不主动读取或展示本地密钥内容。配置错误只报告缺少的配置项，不打印值。前端可在本地配置时向服务端提交用户输入的密钥，但不得持久化或回显已保存的密钥。
+- 文档分工：`docs/` 只维护项目整体说明、需求、架构、数据／接口、流程、评估方案和长期设计决策；修复经过、代码审查、逐次测试结果等维护记录放在独立的 `changelog/`，不要在设计文档中追加修复流水账。修复涉及的长期契约应更新对应设计章节，而不是让设计依赖修复记录。
 - `CLAUDE.md` 指向本文件并由 Git 忽略；协作规则只维护本文件，避免两份规则漂移。
 
 ## 6. 修改与验证流程
@@ -83,4 +84,4 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_storage.py tests/test_workflo
 .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-前端在 `frontend/` 执行 `npm ci`、`npm run build` 和 `npm run dev`。验证范围与实际结果见 [代码审查记录](<docs/08-code-review.md>)；运行与配置细节见 [README](<README.md>)。不能把离线定向测试等同于真实模型、arXiv 网络或浏览器联调验收。
+前端在 `frontend/` 执行 `npm ci`、`npm run build` 和 `npm run dev`。验证方法及验收边界见 [开发与评估](<docs/05-development-and-evaluation.md>)；运行与配置细节见 [README](<README.md>)。具体修改与历史执行结果单独保存在 `changelog/`。不能把离线定向测试等同于真实模型、arXiv 网络或浏览器联调验收。

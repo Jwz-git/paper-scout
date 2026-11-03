@@ -21,9 +21,9 @@
 - 检查实际全文链接的可用性与相应使用许可。能打开不代表可以任意重新分发；不提交下载的论文。
 - 确认模型服务的数据处理政策、价格、结构化输出能力和可提供的用量统计；真实调用前确认可能产生的费用。
 
-## 2026-11-02 实现核验补记
+## 协议字段与兼容边界
 
-本轮只核验协议资料并执行离线测试，没有使用付费模型或真实检索／下载。OpenAI、Anthropic 文档网页分别遇到403／超时，不能声称本轮已直接读取这些网页；改用官方 SDK 中由 OpenAPI 生成的类型核对字段。该核验不证明第三方兼容服务或具体型号支持所有可选参数。
+以下依据于2026-11-02通过官方 SDK 中由 OpenAPI 生成的类型及技术资料核对，不能据此假定已直接读取所有协议网页，也不证明第三方兼容服务或具体型号支持所有可选参数。资料核对和离线协议测试不替代实际供应商接入验收。
 
 | 实现要点 | 官方依据 |
 | --- | --- |
@@ -35,4 +35,10 @@
 | 同步subprocess超时的终止行为、异步路径需显式终止回收 | [Python subprocess.run](https://docs.python.org/3/library/subprocess.html#subprocess.run) |
 | 校验后连接固定IP时保持原TLS服务名与证书校验 | [已安装httpcore 1.0.9连接实现](https://raw.githubusercontent.com/encode/httpcore/1.0.9/httpcore/_async/connection.py) |
 
-实际价格、注册条件、服务可达性与课题检索质量没有重新核验。PDF子进程隔离和时限不是完整内存资源沙箱；复杂表格和大压缩内容仍需受控样本人工评估。
+实际价格、注册条件、服务可达性与课题检索质量须随用户所选服务独立核验。PDF 子进程隔离和时限不是完整内存资源沙箱；复杂表格和大压缩内容仍需受控样本人工评估。
+
+## 模型列表接口
+
+2026-11-03核验：[OpenAI模型列表](https://developers.openai.com/api/reference/resources/models/methods/list)为GET `/models`，返回`data`模型清单，使用Bearer凭据；Chat Completions与Responses配置共用此列表入口。[Anthropic模型列表](https://platform.claude.com/docs/en/api/models/list)为GET `/v1/models`，返回`data/has_more/last_id`，以`after_id`继续分页。本项目的服务地址已包含用户提供的API前缀，因此只追加`/models`。
+
+Anthropic列表沿用现有适配器的`x-api-key`和`anthropic-version: 2023-06-01`。[认证文档](https://platform.claude.com/docs/en/manage-claude/authentication)说明仍支持该密钥头，[版本文档](https://platform.claude.com/docs/en/api/versioning)列出此版本。当前实现只接收供应商原样返回的模型标识，不预置或推断型号能力；第三方兼容服务、实际凭据权限及连通性仍需用户所选服务验证。
