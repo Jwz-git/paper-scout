@@ -5,6 +5,62 @@ export interface HealthResponse {
   model_configured?: boolean;
 }
 
+export type ModelProtocol = 'openai_chat' | 'openai_responses' | 'anthropic_messages';
+
+export interface ModelSettings {
+  enabled: boolean;
+  protocol: ModelProtocol;
+  base_url: string;
+  model: string;
+  api_key_set: boolean;
+  source: 'environment' | 'local';
+  busy: boolean;
+  active_provider_id: string | null;
+  active_model: string | null;
+  providers: AiProvider[];
+  limits: {
+    research: { max_rounds: number; max_calls: number; max_seconds: number };
+    conversation: { max_calls: number; max_seconds: number };
+  };
+}
+
+export interface AiProvider {
+  id: string;
+  name: string;
+  protocol: ModelProtocol;
+  base_url: string;
+  models: string[];
+  api_key_set: boolean;
+}
+
+export interface ProviderUpdate {
+  name: string;
+  protocol: ModelProtocol;
+  base_url: string;
+  models: string[];
+  api_key: string | null;
+  clear_api_key: boolean;
+}
+
+export interface AvailableModel { id: string; name: string; }
+export interface ModelCatalogRequest {
+  protocol: ModelProtocol;
+  base_url: string;
+  api_key: string | null;
+  clear_api_key: boolean;
+  provider_id: string | null;
+  cursor?: string | null;
+}
+
+export interface ModelSettingsUpdate {
+  enabled: boolean;
+  protocol: ModelProtocol;
+  base_url: string;
+  model: string;
+  api_key: string | null;
+  clear_api_key: boolean;
+}
+
 export interface TokenUsage {
   prompt_tokens: number | null;
   completion_tokens: number | null;
@@ -64,6 +120,8 @@ export interface ChatRequest {
 export interface Task {
   id: string;
   topic: string;
+  title?: string | null;
+  deleted_at?: string | null;
   start_year?: number | null;
   end_year?: number | null;
   focus_dimensions: string[];
@@ -208,8 +266,60 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
   return (await request("/health", { signal })).json();
 }
 
-export async function getConversations(signal?: AbortSignal): Promise<Task[]> {
-  return (await request("/conversations", { signal })).json();
+export async function getModelSettings(signal?: AbortSignal): Promise<ModelSettings> {
+  return (await request('/settings', { signal, cache: 'no-store' })).json();
+}
+
+export async function saveModelSettings(payload: ModelSettingsUpdate, signal?: AbortSignal): Promise<ModelSettings> {
+  return (await request('/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload), signal,
+  })).json();
+}
+
+export async function getConversations(signal?: AbortSignal, deleted = false): Promise<Task[]> {
+  return (await request(`/conversations?deleted=${deleted}`, { signal })).json();
+}
+
+export async function renameConversation(id: string, title: string, signal?: AbortSignal): Promise<Task> {
+  return (await request(`/conversations/${encodeURIComponent(id)}/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }), signal })).json();
+}
+
+export async function trashConversation(id: string, signal?: AbortSignal): Promise<Task> {
+  return (await request(`/conversations/${encodeURIComponent(id)}/trash`, { method: 'POST', signal })).json();
+}
+
+export async function restoreConversation(id: string, signal?: AbortSignal): Promise<Task> {
+  return (await request(`/conversations/${encodeURIComponent(id)}/restore`, { method: 'POST', signal })).json();
+}
+
+export interface TrashPage { items: Task[]; total: number; matched: number; }
+export async function getTrash(query: string, sort: string, offset: number, limit: number, signal?: AbortSignal): Promise<TrashPage> {
+  const params = new URLSearchParams({ query, sort, offset: String(offset), limit: String(limit) });
+  return (await request(`/conversations/trash?${params}`, { signal })).json();
+}
+export async function restoreTrash(ids: string[] | null): Promise<{ tasks: Task[] }> {
+  return (await request('/conversations/trash/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })).json();
+}
+export async function deleteTrash(ids: string[] | null): Promise<{ ids: string[] }> {
+  return (await request('/conversations/trash/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })).json();
+}
+
+export async function saveProvider(id: string | null, payload: ProviderUpdate, signal?: AbortSignal): Promise<{ provider_id: string; settings: ModelSettings }> {
+  const path = id ? `/settings/providers/${encodeURIComponent(id)}` : '/settings/providers';
+  return (await request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal })).json();
+}
+
+export async function fetchAvailableModels(payload: ModelCatalogRequest, signal?: AbortSignal): Promise<{ models: AvailableModel[]; next_cursor: string | null }> {
+  return (await request('/settings/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal, cache: 'no-store' })).json();
+}
+
+export async function selectProviderModel(providerId: string, model: string, signal?: AbortSignal): Promise<ModelSettings> {
+  return (await request('/settings/selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider_id: providerId, model }), signal })).json();
+}
+
+export async function deleteProvider(id: string, signal?: AbortSignal): Promise<ModelSettings> {
+  return (await request(`/settings/providers/${encodeURIComponent(id)}/delete`, { method: 'POST', signal })).json();
 }
 
 export async function getConversation(taskId: string, signal?: AbortSignal): Promise<ConversationView> {

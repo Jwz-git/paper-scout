@@ -1,8 +1,9 @@
 <template>
   <article class="paper-detail">
     <button class="text-button back-link" @click="$emit('back')">← 返回文献列表</button>
-    <div class="eyebrow">论文 · 本次运行快照</div>
-    <h2>{{ detail.paper.title }}</h2>
+    <h2>文献详情</h2>
+    <p class="detail-context">论文 · 本次运行快照</p>
+    <p class="paper-detail-title">{{ detail.paper.title }}</p>
     <p class="paper-authors">{{ detail.paper.authors.join('、') || '作者信息缺失' }}</p>
     <dl class="metadata-grid">
       <div><dt>年份</dt><dd>{{ detail.paper.year ?? '缺失' }}</dd></div>
@@ -29,18 +30,18 @@
 
     <section class="reading-summary">
       <h3>实际读取范围</h3>
-      <div class="reading-tags">
-        <span>元数据 {{ countReadable('metadata') ? '已保存' : '未读取' }}</span>
-        <span>摘要 {{ countReadable('abstract') ? '已保存' : '未读取 / 缺失' }}</span>
-        <span>全文 {{ countReadable('fulltext') }} 个可读页快照</span>
-      </div>
+      <dl class="reading-tags">
+        <div><dt>元数据</dt><dd>{{ countReadable('metadata') ? '已保存' : '未读取' }}</dd></div>
+        <div><dt>摘要</dt><dd>{{ countReadable('abstract') ? '已保存' : '未读取 / 缺失' }}</dd></div>
+        <div><dt>全文</dt><dd>{{ countReadable('fulltext') }} 个可读页快照</dd></div>
+      </dl>
       <p class="muted">仅代表保存的来源与页，不表示阅读全文。下载失败、扫描页、截断与解析状态按原记录展示；不提供 OCR。</p>
     </section>
 
     <section v-if="detail.sources.length" class="saved-sources">
       <h3>来源快照</h3>
       <div class="source-tabs" aria-label="选择来源快照">
-        <button v-for="source in detail.sources" :key="source.id" :class="{ active: selectedSourceId === source.id }" @click="selectedSourceId = source.id">
+        <button v-for="source in detail.sources" :key="source.id" :class="{ active: selectedSourceId === source.id }" :aria-pressed="selectedSourceId === source.id" @click="selectedSourceId = source.id">
           {{ sourceLabels[source.source_type] }}{{ source.page_number != null ? ` · p${source.page_number}` : '' }}
           <span v-if="source.status !== 'ok'"> · {{ statusLabel(source.status) }}</span>
         </button>
@@ -52,7 +53,7 @@
           <span v-if="selectedSource.page_number != null">PDF 第 {{ selectedSource.page_number }} 页</span>
         </div>
         <p v-if="sourceLink(selectedSource.source_url)" class="source-url"><a :href="sourceLink(selectedSource.source_url)" target="_blank" rel="noopener noreferrer">{{ selectedSource.source_url }} ↗</a></p>
-        <pre v-if="selectedSource.content" class="source-preview"><template v-if="highlight"><span>{{ highlight.before }}</span><mark>{{ highlight.quote }}</mark><span>{{ highlight.after }}</span></template><template v-else>{{ selectedSource.content }}</template></pre>
+        <pre v-if="selectedSource.content" class="source-preview" tabindex="0" role="region" aria-label="已保存的来源原文"><template v-if="highlight"><span>{{ highlight.before }}</span><mark>{{ highlight.quote }}</mark><span>{{ highlight.after }}</span></template><template v-else>{{ selectedSource.content }}</template></pre>
         <p v-else class="muted">此快照没有可读文本（{{ statusLabel(selectedSource.status) }}）。</p>
         <code class="source-id">{{ selectedSource.id }}</code>
       </template>
@@ -120,37 +121,49 @@ function openEvidence(evidence: Evidence) {
 </script>
 
 <style scoped>
-.paper-detail { min-width: 0; }
-h2 { margin: 10px 0; font-size: 19px; letter-spacing: -.025em; line-height: 1.45; }
-h3 { font-size: 13px; margin: 0 0 12px; }
-.eyebrow { color: #697873; font-size: 10px; letter-spacing: .08em; margin-top: 24px; }
-.paper-authors { font-size: 12px; color: #687570; line-height: 1.7; }
-.metadata-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 22px 0; }
+.paper-detail { min-width: 0; color: var(--text); }
+h2 { margin: 20px 0 0; font-size: 18px; font-weight: 500; line-height: 1.4; }
+h3 { margin: 0 0 12px; font-size: var(--fs-section); font-weight: 500; line-height: 1.5; }
+.detail-context { margin: 6px 0 20px; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
+.paper-detail-title { margin: 0 0 12px; font-size: 18px; font-weight: 500; line-height: 1.7; overflow-wrap: anywhere; }
+.paper-authors { color: var(--muted); font-size: var(--fs-body); line-height: 1.8; }
+.metadata-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
 .metadata-grid .wide { grid-column: 1 / -1; }
-dt { color: #79857e; font-size: 10px; margin-bottom: 5px; }
-dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
-.external-links { display: flex; gap: 18px; font-size: 12px; }
-a { color: #256650; text-decoration: none; overflow-wrap: anywhere; } a:hover { text-decoration: underline; }
-.back-link { margin: 0 0 5px; }
-.text-button { background: none; padding: 0; border: 0; color: #65776e; cursor: pointer; font: inherit; font-size: 12px; }
+dt { margin-bottom: 6px; color: var(--muted); font-size: var(--fs-small); }
+dd { margin: 0; color: var(--text); font-size: var(--fs-body); line-height: 1.65; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.external-links { display: flex; flex-wrap: wrap; gap: 12px 18px; font-size: var(--fs-small); }
+a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.back-link { margin: 0; }
+.text-button { display: inline-flex; align-items: center; min-height: 32px; padding: 2px 0; border: 0; background: none; color: var(--text); cursor: pointer; font: inherit; font-size: var(--fs-small); }
+.text-button:hover { text-decoration: underline; text-underline-offset: 3px; }
 .citation-focus, .reading-summary, .saved-sources { margin-top: 28px; }
-.citation-focus { background: #f1f6ef; padding: 17px; border: 1px solid #dfe9dc; border-radius: 12px; }
-.section-heading { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: #61785f; }
-blockquote { margin: 12px 0; padding-left: 13px; border-left: 2px solid #8fa989; font-size: 13px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
-.muted { color: #78847d; font-size: 11px; line-height: 1.8; }
-.source-id { display: block; color: #7e8983; font-size: 10px; overflow-wrap: anywhere; margin: 12px 0; }
-.reading-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.reading-tags span { font-size: 10px; padding: 6px 8px; border: 1px solid #e0e6df; border-radius: 6px; }
-.source-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
-.source-tabs button { cursor: pointer; background: #f3f5f1; border: 1px solid transparent; color: #69766f; border-radius: 7px; padding: 7px 9px; font-size: 11px; }
-.source-tabs button.active { border-color: #a7b9a0; background: #eaf0e7; color: #355a3d; }
-.source-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; font-size: 10px; color: #748178; }
-.source-url { font-size: 10px; line-height: 1.7; }
-.source-preview { padding: 14px; background: #f7f8f4; border: 1px solid #e7eae2; border-radius: 9px; font: 11px/1.9 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 520px; overflow-y: auto; }
-mark { background: #dceabe; color: inherit; border-radius: 2px; }
-.error-message { color: #a04434; background: #fff0ea; font-size: 11px; line-height: 1.7; padding: 10px; border-radius: 8px; }
-.evidence-records { margin-top: 25px; font-size: 12px; } summary { cursor: pointer; color: #66776c; }
-.evidence-card { display: block; width: 100%; text-align: left; padding: 14px; margin-top: 10px; border: 1px solid #e3e9df; background: #fff; border-radius: 9px; cursor: pointer; font: inherit; }
-.evidence-card span, .evidence-card small { display: block; font-size: 10px; color: #76856e; }
-.evidence-card q { display: block; margin: 9px 0; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.citation-focus { padding: 16px; border-radius: var(--radius-card); background: var(--accent-soft); }
+.section-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: var(--accent); font-size: var(--fs-small); }
+.section-heading h3 { margin-bottom: 0; color: var(--text); }
+blockquote { margin: 12px 0; padding-left: 12px; border-left: 2px solid var(--accent); color: var(--text); font-size: var(--fs-body); line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+.muted { color: var(--muted); font-size: var(--fs-small); line-height: 1.8; }
+.source-id { display: block; margin: 12px 0; color: var(--muted); font-family: var(--font); font-size: var(--fs-small); line-height: 1.65; overflow-wrap: anywhere; }
+.reading-tags { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0 0 12px; padding: 16px; border-radius: var(--radius-card); background: var(--raised); }
+.reading-tags > div:last-child { grid-column: 1 / -1; }
+.source-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.source-tabs button { min-height: 36px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--muted); cursor: pointer; font: inherit; font-size: var(--fs-small); }
+.source-tabs button.active { border-color: var(--control); background: var(--active); color: var(--text); }
+.source-tabs button:hover { border-color: var(--control); }
+.source-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 16px; color: var(--muted); font-size: var(--fs-small); line-height: 1.7; }
+.source-url { margin: 12px 0; font-size: var(--fs-small); line-height: 1.7; }
+.source-preview { max-height: 520px; padding: 16px; overflow-y: auto; border-radius: var(--radius-card); background: var(--raised); color: var(--text); font: var(--fs-body)/1.9 var(--font); white-space: pre-wrap; overflow-wrap: anywhere; }
+mark { border-radius: 2px; background: var(--active); color: var(--text); }
+.error-message { padding: 12px; border-radius: var(--radius-control); background: var(--negative-soft); color: var(--negative-ink); font-size: var(--fs-small); line-height: 1.8; }
+.evidence-records { margin-top: 24px; font-size: var(--fs-body); }
+summary { min-height: 36px; padding: 8px 0; color: var(--text); cursor: pointer; }
+.evidence-card { display: block; width: 100%; margin-top: 12px; padding: 14px; text-align: left; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
+.evidence-card:hover { border-color: var(--control); }
+.evidence-card span, .evidence-card small { display: block; color: var(--muted); font-size: var(--fs-small); line-height: 1.7; }
+.evidence-card q { display: block; margin: 10px 0; font-size: var(--fs-body); line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .text-button, .source-tabs button, summary { min-height: 44px; }
+  .external-links a { display: inline-flex; align-items: center; min-height: 44px; }
+  .paper-detail-title { font-size: var(--fs-reading); }
+}
 </style>
