@@ -81,6 +81,8 @@ class ConversationStore:
             if prior:
                 if prior["payload"] != payload:
                     raise StateConflict("request_id 已被不同内容或模式使用")
+                if self.db.get_task(prior["task_id"]).deleted_at is not None:
+                    raise StateConflict("对话已移到回收站，请先恢复后再操作")
                 return prior["task_id"]
             if task_id is None:
                 task = Task(id="task_"+uuid4().hex,topic=req.content)

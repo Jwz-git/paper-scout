@@ -12,6 +12,8 @@ class SerialWorker:
         self.db, self.engine = db, engine
         self.dialogue = dialogue if dialogue is not None else DialogueService(db,getattr(engine,"llm",None))
         self.wake = asyncio.Event()
+        self.busy = False
+        self.active_task_id = None
 
     def notify(self):
         self.wake.set()
@@ -28,6 +30,8 @@ class SerialWorker:
                 await self.wake.wait()
                 continue
             try:
+                self.busy = True
+                self.active_task_id = turn["task_id"] if turn is not None else queued[0].task_id
                 if turn is not None:
                     await self.dialogue.process(turn)
                 else:
@@ -37,3 +41,6 @@ class SerialWorker:
             except Exception as exc:
                 # 服务已持久化程序错误；只记类别，不泄漏原文或凭据。
                 logger.error("串行执行程序错误：%s", type(exc).__name__)
+            finally:
+                self.busy = False
+                self.active_task_id = None

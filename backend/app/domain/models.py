@@ -72,6 +72,8 @@ class Task(BaseModel):
 
     id: str
     topic: str
+    title: Optional[str] = None
+    deleted_at: Optional[datetime] = None
     start_year: Optional[int] = None
     end_year: Optional[int] = None
     focus_dimensions: List[str] = Field(default_factory=list)

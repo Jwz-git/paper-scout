@@ -210,6 +210,10 @@ class Database:
             if conn.execute("PRAGMA user_version").fetchone()[0] == 1:
                 conn.execute("ALTER TABLE run_messages ADD COLUMN proposed_scope TEXT")
                 conn.execute("PRAGMA user_version = 2")
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 2:
+                conn.execute("ALTER TABLE tasks ADD COLUMN title TEXT")
+                conn.execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT")
+                conn.execute("PRAGMA user_version = 3")
             conn.execute("CREATE TABLE IF NOT EXISTS conversation_usage (task_id TEXT PRIMARY KEY REFERENCES tasks(id), data TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS chat_messages (id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),role TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS conversation_turns (request_scope TEXT NOT NULL,request_id TEXT NOT NULL,payload TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id),user_id TEXT NOT NULL REFERENCES chat_messages(id),assistant_id TEXT NOT NULL REFERENCES chat_messages(id),status TEXT NOT NULL,mode TEXT NOT NULL,run_id TEXT REFERENCES runs(id),paused_by_dialogue INTEGER NOT NULL DEFAULT 0,decision TEXT,PRIMARY KEY(request_scope,request_id))")
@@ -220,8 +224,8 @@ class Database:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO tasks (id, topic, start_year, end_year, focus_dimensions, output_requirements, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (id, topic, start_year, end_year, focus_dimensions, output_requirements, created_at, updated_at, title, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -232,6 +236,8 @@ class Database:
                     task.output_requirements,
                     task.created_at.isoformat(),
                     task.updated_at.isoformat(),
+                    task.title,
+                    task.deleted_at.isoformat() if task.deleted_at else None,
                 ),
             )
 
@@ -243,6 +249,8 @@ class Database:
             return Task(
                 id=row["id"],
                 topic=row["topic"],
+                title=row["title"],
+                deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
                 start_year=row["start_year"],
                 end_year=row["end_year"],
                 focus_dimensions=json.loads(row["focus_dimensions"] or "[]"),
@@ -251,13 +259,16 @@ class Database:
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
 
-    def list_tasks(self, limit: int = 50) -> List[Task]:
+    def list_tasks(self, limit: int = 50, deleted: bool = False) -> List[Task]:
         with self._get_connection() as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            condition = "IS NOT NULL" if deleted else "IS NULL"
+            rows = conn.execute(f"SELECT * FROM tasks WHERE deleted_at {condition} ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
             return [
                 Task(
                     id=row["id"],
                     topic=row["topic"],
+                    title=row["title"],
+                    deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
                     start_year=row["start_year"],
                     end_year=row["end_year"],
                     focus_dimensions=json.loads(row["focus_dimensions"] or "[]"),
@@ -267,6 +278,66 @@ class Database:
                 )
                 for row in rows
             ]
+
+    def rename_task(self, task_id, title):
+        with self._get_connection() as conn:
+            conn.execute("UPDATE tasks SET title=?, updated_at=? WHERE id=?", (title, utc_now().isoformat(), task_id))
+            return self.get_task(task_id)
+
+    def trash_task(self, task_id, deleted):
+        with self._get_connection() as conn:
+            conn.execute("UPDATE tasks SET deleted_at=?, updated_at=? WHERE id=?",
+                         (utc_now().isoformat() if deleted else None, utc_now().isoformat(), task_id))
+            return self.get_task(task_id)
+
+    def list_trash(self, query, sort, offset, limit):
+        order = {"newest": "deleted_at DESC, id", "oldest": "deleted_at ASC, id",
+                 "title": "COALESCE(title, topic) COLLATE NOCASE, id"}[sort]
+        where = "deleted_at IS NOT NULL AND instr(lower(COALESCE(title, '') || ' ' || topic), lower(?)) > 0"
+        with self._get_connection() as conn:
+            total = conn.execute("SELECT count(*) FROM tasks WHERE deleted_at IS NOT NULL").fetchone()[0]
+            matched = conn.execute(f"SELECT count(*) FROM tasks WHERE {where}", (query,)).fetchone()[0]
+            rows = conn.execute(f"SELECT id FROM tasks WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                                (query, limit, offset)).fetchall()
+            return {"items": [self.get_task(row[0]) for row in rows], "total": total, "matched": matched}
+
+    def _trash_targets(self, conn, ids):
+        if ids is None:
+            return [row[0] for row in conn.execute("SELECT id FROM tasks WHERE deleted_at IS NOT NULL ORDER BY id")]
+        unique = list(dict.fromkeys(ids))
+        marks = ",".join("?" for _ in unique)
+        found = {row[0] for row in conn.execute(f"SELECT id FROM tasks WHERE deleted_at IS NOT NULL AND id IN ({marks})", unique)}
+        if found != set(unique):
+            raise StateConflict("部分对话已被恢复或删除，请刷新回收站后重试")
+        return unique
+
+    def restore_trash(self, ids):
+        with self._get_connection() as conn:
+            return [self.trash_task(task_id, False) for task_id in self._trash_targets(conn, ids)]
+
+    def delete_trash(self, ids, active_task_id=None):
+        with self._get_connection() as conn:
+            targets = self._trash_targets(conn, ids)
+            if active_task_id in targets:
+                raise StateConflict("对话的在途请求尚未结束，请稍后再彻底删除")
+            for task_id in targets:
+                # 先保存候选来源；只清理不再被其他运行引用的数据。
+                sources = [row[0] for row in conn.execute("SELECT source_text_id FROM run_sources WHERE run_id IN (SELECT id FROM runs WHERE task_id=?)", (task_id,))]
+                papers = [row[0] for row in conn.execute("SELECT paper_id FROM run_papers WHERE run_id IN (SELECT id FROM runs WHERE task_id=?)", (task_id,))]
+                conn.execute("DELETE FROM conversation_turns WHERE task_id=?", (task_id,))
+                conn.execute("DELETE FROM chat_messages WHERE task_id=?", (task_id,))
+                conn.execute("DELETE FROM conversation_usage WHERE task_id=?", (task_id,))
+                for table in ("run_messages", "reports", "events", "search_queries", "assessments", "run_sources", "run_papers", "conversation_run_states"):
+                    conn.execute(f"DELETE FROM {table} WHERE run_id IN (SELECT id FROM runs WHERE task_id=?)", (task_id,))
+                conn.execute("DELETE FROM runs WHERE task_id=?", (task_id,))
+                conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+                for source_id in sources:
+                    if not conn.execute("SELECT 1 FROM run_sources WHERE source_text_id=?", (source_id,)).fetchone():
+                        conn.execute("DELETE FROM evidence WHERE source_text_id=?", (source_id,))
+                        conn.execute("DELETE FROM source_texts WHERE id=?", (source_id,))
+                for paper_id in papers:
+                    conn.execute("DELETE FROM papers WHERE id=? AND NOT EXISTS (SELECT 1 FROM run_papers WHERE paper_id=?) AND NOT EXISTS (SELECT 1 FROM source_texts WHERE paper_id=?) AND NOT EXISTS (SELECT 1 FROM evidence WHERE paper_id=?)", (paper_id, paper_id, paper_id, paper_id))
+            return targets
 
     # --- Run 与状态操作（只在短事务内执行，不跨网络请求） ---
     def create_run(self, run: Run) -> None:
