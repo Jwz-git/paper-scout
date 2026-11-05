@@ -213,9 +213,8 @@ def test_async_parse_cancellation_really_kills_and_reaps_process(monkeypatch):
     asyncio.run(run())
 
 
-def test_parser_programming_error_is_not_converted_to_missing_text(monkeypatch):
+def test_unexpected_parser_exception_on_untrusted_pdf_is_parse_failure(monkeypatch):
     def broken_reader(*args):
-        raise RuntimeError("program bug")
+        raise KeyError("/Root")
     monkeypatch.setattr(_pdf_parser, "PdfReader", broken_reader)
-    with pytest.raises(RuntimeError, match="program bug"):
-        _pdf_parser.parse_pdf(b"sample", 2)
+    assert _pdf_parser.parse_pdf(b"sample", 2)["error"]["code"] == "parse_failed"

@@ -35,6 +35,20 @@ def test_trash_search_sort_pagination_and_restore_all_beyond_100(client):
     assert all(task.deleted_at is None for task in db.list_tasks(200))
 
 
+def test_active_conversation_list_pages_and_searches_beyond_first_page(client):
+    db = client.app.state.db
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(105):
+        db.create_task(Task(id=f"a-{index:03}", topic=f"人工问题 {index}",
+                            title="Needle % title" if index == 0 else None, updated_at=start + timedelta(minutes=index)))
+    first = client.get('/api/conversations', params={'limit': 100}).json()
+    rest = client.get('/api/conversations', params={'limit': 100, 'offset': 100}).json()
+    assert [t['id'] for t in first][:2] == ['a-104', 'a-103'] and len(rest) == 5
+    assert {t['id'] for t in first} | {t['id'] for t in rest} == {f"a-{i:03}" for i in range(105)}
+    assert [t['id'] for t in client.get('/api/conversations', params={'query': 'needle %'}).json()] == ['a-000']
+    assert [t['id'] for t in client.get('/api/conversations', params={'query': '问题 7'}).json()][-1] == 'a-007'
+
+
 def test_batch_conflict_is_atomic_and_only_trash_can_be_deleted(client):
     db = client.app.state.db
     db.create_task(Task(id='trash', topic='deleted', deleted_at=datetime.now(timezone.utc)))

@@ -267,10 +267,11 @@ class Database:
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
 
-    def list_tasks(self, limit: int = 50, deleted: bool = False) -> List[Task]:
+    def list_tasks(self, limit: int = 50, deleted: bool = False, offset: int = 0, query: str = "") -> List[Task]:
         with self._get_connection() as conn:
             condition = "IS NOT NULL" if deleted else "IS NULL"
-            rows = conn.execute(f"SELECT * FROM tasks WHERE deleted_at {condition} ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(f"SELECT * FROM tasks WHERE deleted_at {condition} AND instr(lower(COALESCE(title, '') || ' ' || topic), lower(?)) > 0 "
+                                "ORDER BY updated_at DESC, id LIMIT ? OFFSET ?", (query, limit, offset)).fetchall()
             return [
                 Task(
                     id=row["id"],

@@ -1,4 +1,5 @@
 """报告快照、中文/分页导出和下载不调用模型的定向验证。"""
+from urllib.parse import quote
 from io import BytesIO
 from uuid import uuid4
 
@@ -11,7 +12,7 @@ from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.reports import markdown, pdf, word
 from backend.app.storage.database import Database
-from backend.app.domain.models import Task
+from backend.app.domain.models import Paper, Task
 from tests.test_analysis import ResearchModel, ResearchSearch, run_research
 
 
@@ -73,4 +74,8 @@ def test_downloads_bind_report_id_and_never_generate(completed):
         assert data['analyses'] and data['assessment']['field_counts']
         detail = client.get('/api/runs/r/papers/p0').json()
         assert detail['analysis']['fields'] and detail['selection']['reason']
+        legacy = Paper(id='arxiv:cond-mat/0102536v1', source_id='cond-mat/0102536v1', title='Legacy id', url='https://arxiv.org/abs/cond-mat/0102536v1')
+        db.save_papers([legacy], 'r')
+        response = client.get('/api/runs/r/papers/' + quote(legacy.id, safe=''))
+        assert response.status_code == 200 and response.json()['paper']['id'] == legacy.id
     assert len(model.requests) == calls

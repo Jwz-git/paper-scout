@@ -246,7 +246,7 @@ def test_anthropic_input_usage_includes_reported_cache_tokens():
     assert response.usage.total_tokens == 65
 
 
-@pytest.mark.parametrize("status,code", [(401, "authentication_failed"), (429, "rate_limited"), (503, "http_error")])
+@pytest.mark.parametrize("status,code", [(401, "authentication_failed"), (429, "rate_limited"), (503, "server_error"), (404, "http_error")])
 def test_service_failures_have_safe_explicit_codes(status, code):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(status))) as client:

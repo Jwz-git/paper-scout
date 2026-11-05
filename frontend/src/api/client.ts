@@ -20,7 +20,7 @@ export interface ModelSettings {
   providers: AiProvider[];
   limits: {
     research: { max_rounds: number; max_calls: number; max_seconds: number };
-    conversation: { max_calls: number; max_seconds: number };
+    conversation: { calls_per_turn: number; seconds_per_turn: number };
   };
 }
 
@@ -103,8 +103,6 @@ export interface ConversationView {
   usage: {
     model_calls: number;
     total_execution_seconds: number;
-    max_calls: number;
-    max_seconds: number;
     token_usage: TokenUsage;
   };
   busy: boolean;
@@ -242,7 +240,7 @@ export interface ResearchAnalysis {
 export interface ReportClaim { text: string; origin: 'author' | 'inference' | 'user'; evidence_ids: string[]; }
 export interface ReportDocument {
   analysis_revision: number; sections: { title: string; claims: ReportClaim[] }[];
-  evidence: Evidence[]; semantic_review: string;
+  evidence: Evidence[]; excluded_papers: Paper[];
 }
 export interface PaperDetail {
   paper: Paper;
@@ -315,8 +313,9 @@ export async function saveModelSettings(payload: ModelSettingsUpdate, signal?: A
   })).json();
 }
 
-export async function getConversations(signal?: AbortSignal, deleted = false): Promise<Task[]> {
-  return (await request(`/conversations?deleted=${deleted}`, { signal })).json();
+export async function getConversations(page: { query: string; offset: number; limit: number }, signal?: AbortSignal): Promise<Task[]> {
+  const params = new URLSearchParams({ query: page.query, offset: String(page.offset), limit: String(page.limit) });
+  return (await request(`/conversations?${params}`, { signal })).json();
 }
 
 export async function renameConversation(id: string, title: string, signal?: AbortSignal): Promise<Task> {

@@ -20,7 +20,7 @@ const source = { id: 'offline-source', paper_id: 'offline-paper', source_type: '
 const paper = { id: 'offline-paper', title: '人工文献样例（非真实论文）', authors: [], year: 2024, source: 'arxiv', source_id: 'offline-fixture', url: 'https://arxiv.org/abs/0000.00000', fetched_at: now, abstract: '这是离线界面验证的人工摘要。' };
 const citation = { source_text_id: source.id, paper_id: paper.id, run_id: 'offline-run', source_type: source.source_type, source_url: source.source_url, page_number: 2, quote, location_start: 1, location_end: 1 + Array.from(quote).length };
 const run = { id: 'offline-run', task_id: taskA.id, initial_topic: taskA.topic, initial_input: { topic: taskA.topic, focus_dimensions: [] }, current_input: { topic: taskA.topic, focus_dimensions: [] }, status: 'running', stage: 'searching', current_round: 1, max_rounds: 3, max_calls: 20, max_seconds: 900, total_calls: 2, total_execution_seconds: 3.5, model_calls: 1, token_usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null }, gaps: [], created_at: now };
-const usage = { model_calls: 1, max_calls: 40, total_execution_seconds: 1.2, max_seconds: 900, token_usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null } };
+const usage = { model_calls: 1, total_execution_seconds: 1.2, token_usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null } };
 const message = (id, taskId, role, content, extra = {}) => ({ id, task_id: taskId, role, content, status: 'completed', citations: [], created_at: now, ...extra });
 let viewA = { task: taskA, messages: [message('a-user', taskA.id, 'user', '人工会话A的原始问题'), message('a-answer', taskA.id, 'assistant', '这条回答引用已保存的人工来源样例，语义支持仍需复核。', { action: 'answer', run_id: run.id, citations: [citation] })], runs: [run], usage, busy: false, model_configured: true };
 const viewB = { task: taskB, messages: [message('b-user', taskB.id, 'user', '人工会话B的原始问题')], runs: [], usage, busy: false, model_configured: true };
@@ -57,6 +57,7 @@ if (chatOnly) {
       '[公开来源](https://arxiv.org/)\n\n<img src="https://invalid.example/raw-image" onerror="window.__markdownExecuted=true">\n\n[不安全链接](javascript:alert(1))\n\n![不自动下载图片](https://invalid.example/tracker.png)',
       ...Array.from({ length: 8 }, (_, index) => `### 待核查方向 ${index + 1}\n这里只展示人工长文本，检查滚动阅读时后台刷新是否改变当前位置。实际结论需要逐条关联已保存的来源，缺失字段必须明确标记。`),
     ].join('\n\n'), { run_id: run.id, citations: [citation] }),
+    message('a-run-summary', taskA.id, 'assistant', '研究 offline-run 状态为 running。', { run_id: run.id }),
   ];
 }
 
@@ -74,7 +75,7 @@ const selection = { paper_id: paper.id, relevant: true, reviewed: true, reason: 
 const researchAnalysis = { analysis_revision: 2, papers: [paper], analyses: [analysis], selections: [selection], assessment: {
   sufficient: false, rule: 'coverage-v1', supporting_papers: { '通信': ['paper-group'] }, field_counts: { [paper.id]: [1, 6] }, paper_groups: { [paper.id]: 'paper-group' }, duplicate_candidates: [], gaps: ['人工缺口：数据集尚未找到'], next_actions: ['针对数据集补读'],
   comparisons: [{ left_paper_id: paper.id, right_paper_id: 'other-paper', status: 'not_comparable', metric: 'accuracy', left_value: '80', right_value: '90', reasons: ['评价协议不一致'], evidence_ids: [evidence.id] }] } };
-const researchReport = { id: 'pinned-report', run_id: run.id, title: '人工结构化报告', content_markdown: '# 人工结构化报告\n并非真实研究结果。', gaps: ['人工缺口'], stop_reason: '人工执行上限', document: { analysis_revision: 2, semantic_review: '语义支持尚未人工核验', evidence: [evidence], sections: [{ title: '综合结论', claims: [{ text: '人工主张用于验证引用跳转', origin: 'inference', evidence_ids: [evidence.id] }] }] } };
+const researchReport = { id: 'pinned-report', run_id: run.id, title: '人工结构化报告', content_markdown: '# 人工结构化报告\n并非真实研究结果。', gaps: ['人工缺口'], stop_reason: '人工执行上限', document: { analysis_revision: 2, evidence: [evidence], excluded_papers: [], sections: [{ title: '综合结论', claims: [{ text: '人工主张用于验证引用跳转', origin: 'inference', evidence_ids: [evidence.id] }] }] } };
 if (analysisOnly) viewA = { ...viewA, runs: [{ ...run, status: 'partial', analysis_revision: 2, stage: 'reporting' }] };
 const catalogOnly = process.env.BROWSER_SCENARIO === 'catalog';
 const catalogPosts = [];
@@ -85,7 +86,7 @@ const catalogStarted = new Promise(resolve => { signalCatalog = resolve; });
 const catalogReleased = new Promise(resolve => { releaseCatalog = resolve; });
 const catalogSettled = new Promise(resolve => { settleCatalog = resolve; });
 if (usageOnly) {
-  viewA = { ...viewA, usage: { ...usage, model_calls: 3, max_calls: 10, max_seconds: 120, total_execution_seconds: 59.96, token_usage: { total_tokens: 12400, prompt_tokens: 12000, completion_tokens: 400 } }, runs: [
+  viewA = { ...viewA, usage: { ...usage, model_calls: 3, total_execution_seconds: 59.96, token_usage: { total_tokens: 12400, prompt_tokens: 12000, completion_tokens: 400 } }, runs: [
     { ...run, id: 'usage-old', created_at: '2026-11-02T00:00:00Z', status: 'partial', total_calls: 5, max_calls: 5, current_round: 2, max_rounds: 2, total_execution_seconds: 60.06, max_seconds: 60, model_calls: 2, token_usage: { total_tokens: null, prompt_tokens: 500, completion_tokens: null }, stop_reason: '达到调用上限，保留阶段性资料。' },
     { ...run, total_calls: 8, max_calls: 12, total_execution_seconds: 12, max_seconds: 600, current_round: 2, max_rounds: 4, model_calls: 3 },
   ] };
@@ -98,7 +99,7 @@ let holdTrashAction = false;
 let releaseTrashAction, signalTrashAction;
 const trashActionStarted = new Promise(resolve => { signalTrashAction = resolve; });
 const trashActionReleased = new Promise(resolve => { releaseTrashAction = resolve; });
-let modelSettings = { enabled: false, protocol: 'openai_chat', base_url: '', model: '', api_key_set: false, source: 'environment', busy: false, active_provider_id: null, active_model: null, providers: [], limits: { research: { max_rounds: 3, max_calls: 20, max_seconds: 900 }, conversation: { max_calls: 40, max_seconds: 900 } } };
+let modelSettings = { enabled: false, protocol: 'openai_chat', base_url: '', model: '', api_key_set: false, source: 'environment', busy: false, active_provider_id: null, active_model: null, providers: [], limits: { research: { max_rounds: 3, max_calls: 20, max_seconds: 900 }, conversation: { calls_per_turn: 1, seconds_per_turn: 60 } } };
 const settingsPosts = [];
 let holdSettingsSave = false;
 let rejectNextSettingsSave = false;
@@ -201,7 +202,10 @@ await context.route('**/*', async route => {
   }
   if (url.pathname === '/api/health') return json({ status: 'ok', app: 'Paper Scout', version: '0.1.0' });
   if (url.pathname === '/api/conversations') {
-    if (route.request().method() !== 'POST') return json(everyTask().filter(task => !!task.deleted_at === (url.searchParams.get('deleted') === 'true')));
+    if (route.request().method() !== 'POST') {
+      const query = (url.searchParams.get('query') || '').toLowerCase(); const offset = Number(url.searchParams.get('offset') || 0);
+      return json(everyTask().filter(task => !task.deleted_at && `${task.title || ''} ${task.topic}`.toLowerCase().includes(query)).slice(offset, offset + Number(url.searchParams.get('limit') || 100)));
+    }
     const payload = route.request().postDataJSON();
     creationPosts.push(payload);
     if (!viewC) {
@@ -322,7 +326,13 @@ try {
     assert.equal(await page.locator('.sidebar-close').evaluate(element => element === document.activeElement), true);
     assert.equal(await composer.inputValue(), '保留这段未发送的草稿');
     await composer.fill('');
-    await page.locator('.process-records > summary').click();
+    assert.equal(await page.locator('.turn-activity').count(), 1, '同一次运行只应出现一份执行活动');
+    assert.equal(await page.evaluate(() => {
+      const activity = document.querySelector('.turn-activity');
+      const answer = document.querySelector('.message.assistant .message-markdown');
+      return !!(activity && answer) && activity.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING ? 'before' : 'after';
+    }), 'before', '执行活动应显示在该运行的模型回答之前');
+    await page.locator('.process-records > summary').first().click();
     await page.getByText('人工检索过程记录', { exact: true }).waitFor();
     await page.getByRole('button', { name: '查看资料与报告', exact: true }).click();
     await page.locator('.paper-row').waitFor();
@@ -401,7 +411,7 @@ try {
     await page.getByRole('button', { name: '分析与比较', exact: true }).click();
     await page.getByText('不可直接比较', { exact: true }).waitFor();
     await page.getByText('评价协议不一致', { exact: true }).waitFor();
-    assert.match(await page.locator('.research-analysis').innerText(), /不是准确率评分/);
+    assert.match(await page.locator('.research-analysis').innerText(), /规则 /);
     await page.screenshot({ path: path.join(output, 'research-analysis-desktop.png'), fullPage: true });
     await page.getByRole('button', { name: '研究报告', exact: true }).click();
     await page.getByText('人工主张用于验证引用跳转', { exact: false }).waitFor();
@@ -544,7 +554,7 @@ try {
     holdSettingsSave = true;
     await page.getByRole('button', { name: '保存供应商', exact: true }).click(); await settingsSaveStarted;
     await page.getByRole('button', { name: '关闭设置', exact: true }).click(); releaseSettingsSave();
-    await page.locator('.workspace-notice').filter({ hasText: '供应商已更新' }).waitFor();
+    await page.locator('.toast').filter({ hasText: '供应商已更新' }).waitFor();
     holdSettingsSave = false;
     await page.getByLabel('选择当前模型', { exact: true }).click();
     await page.getByRole('button', { name: '人工供应商 B 更新 · manual-offline-model', exact: true }).click();
@@ -573,7 +583,7 @@ try {
     async function openUsage() { await page.getByRole('button', { name: '打开设置', exact: true }).click(); await page.getByRole('button', { name: '研究与用量', exact: true }).click(); }
     await openUsage();
     await page.getByRole('button', { name: '执行上限', exact: true, pressed: true }).waitFor();
-    assert.deepEqual(await page.locator('.usage-limit-rows dd').allTextContents(), ['40 次', '15 分钟', '3 轮', '20 次', '15 分钟']);
+    assert.deepEqual(await page.locator('.usage-limit-rows dd').allTextContents(), ['1 次', '60 秒', '3 轮', '20 次', '15 分钟']);
     assert.equal(await page.locator('.research-usage input').count(), 0);
     await page.screenshot({ path: path.join(output, 'usage-limits-light.png'), fullPage: true });
     await page.getByRole('button', { name: '用量概览', exact: true }).click();
@@ -584,10 +594,8 @@ try {
     await page.getByRole('button', { name: /离线示例A/ }).click();
     await page.getByText('人工会话A的原始问题', { exact: true }).waitFor();
     await openUsage();
-    const calls = page.getByRole('progressbar', { name: '对话模型调用', exact: true });
-    assert.equal(await calls.getAttribute('aria-valuemax'), '10');
-    assert.equal(await calls.getAttribute('aria-valuenow'), '3');
-    assert.equal(await page.getByRole('progressbar', { name: '对话执行时间', exact: true }).getAttribute('aria-valuetext'), '1 分钟，上限 2 分钟');
+    const conversationTotals = page.getByLabel('对话用量', { exact: true }).locator('dd');
+    assert.deepEqual(await conversationTotals.allTextContents(), ['3 次', '1 分钟']);
     assert.deepEqual(await page.getByLabel('对话 Token', { exact: true }).locator('dd').allTextContents(), ['12,400', '12,000', '400']);
     const runSelect = page.getByLabel('查看调研', { exact: true });
     assert.equal(await runSelect.inputValue(), run.id, 'latest research selected despite response order');
@@ -599,7 +607,7 @@ try {
     assert.deepEqual(await page.getByLabel('调研 Token', { exact: true }).locator('dd').allTextContents(), ['未知', '500', '未知']);
     assert.equal(await page.locator('.usage-research .usage-meter-title').getByText('已达上限', { exact: true }).count(), 2);
     viewA = { ...viewA, usage: { ...viewA.usage, model_calls: 4 } };
-    await page.locator('[aria-label="对话模型调用"][aria-valuenow="4"]').waitFor();
+    await page.getByLabel('对话用量', { exact: true }).getByText('4 次', { exact: true }).waitFor();
     assert.equal(await runSelect.inputValue(), 'usage-old', 'polling preserves explicitly chosen research');
     await runSelect.selectOption(run.id);
     await page.screenshot({ path: path.join(output, 'usage-overview-light.png'), fullPage: true });
@@ -615,7 +623,7 @@ try {
       await page.screenshot({ path: path.join(output, view === '执行上限' ? 'usage-limits-mobile.png' : 'usage-overview-mobile.png'), fullPage: true });
     }
     await page.getByText('用量如何计算', { exact: true }).click();
-    await page.getByText('Token 显示“未知”表示未取得完整统计，不会按 0 计入。', { exact: true }).waitFor();
+    await page.getByText('Token 显示“未知”表示服务未返回完整统计。', { exact: true }).waitFor();
     await page.screenshot({ path: path.join(output, 'usage-accounting-mobile.png'), fullPage: true });
     await page.keyboard.press('Escape');
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -624,7 +632,7 @@ try {
     await openUsage();
     await page.getByText('此对话尚未发起调研，后续记录会显示在这里。', { exact: true }).waitFor();
     assert.equal(await page.locator('#usage-run-select').count(), 0);
-    assert.equal(await calls.getAttribute('aria-valuemax'), '40');
+    assert.deepEqual(await conversationTotals.allTextContents(), ['1 次', '1.2 秒']);
     assert.equal(settingsPosts.length + posts.length + creationPosts.length + trashPosts.length, 0);
     assert.deepEqual(errors, []);
     console.log('PASS usage/default limits separation, actual conversation/run limits, run switching and polling, unknown/partial Token, time formatting and limit progress semantics');
@@ -658,7 +666,7 @@ try {
     await page.getByRole('checkbox', { name: '选择对话：已删除的研究 001', exact: true }).check();
     await page.screenshot({ path: path.join(output, 'trash-light.png'), fullPage: true });
     await page.getByRole('button', { name: '恢复所选', exact: true }).click();
-    await page.getByText('已恢复 2 个对话；研究不会自动重启', { exact: true }).waitFor();
+    await page.getByText('已恢复 2 个对话', { exact: true }).waitFor();
     assert.equal(deletedFixtures.filter(task => task.deleted_at).length, 55);
     assert.equal(await page.locator('.history-select').count(), 4);
     console.log('PASS independent trash window, search, sort, pagination and batch restore update history without replacing sidebar');
@@ -802,6 +810,9 @@ try {
     assert.equal(settingsPosts.length, 0);
     await page.screenshot({ path: path.join(output, 'settings-data.png'), fullPage: true });
     await page.getByRole('button', { name: '关闭设置', exact: true }).click();
+    await page.getByRole('dialog', { name: '放弃本次编辑？', exact: true }).waitFor();
+    await page.getByRole('button', { name: '放弃修改', exact: true }).click();
+    await page.locator('.settings-dialog').waitFor({ state: 'detached' });
     console.log('PASS Markdown/JSON downloads contain the selected conversation and exact citation locations, with no unsaved draft or API key');
 
     const longContent = '用于验证阅读位置的人工消息。\n'.repeat(26);
@@ -913,11 +924,11 @@ try {
     await page.getByText('人工会话A的原始问题', { exact: true }).waitFor();
     await page.getByRole('button', { name: /引用 1/ }).click();
     await page.locator('mark').waitFor();
-    assert.equal(await page.locator('.artifact-panel').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(27, 27, 27)');
+    assert.equal(await page.locator('.artifact-panel').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(33, 33, 33)');
     await page.screenshot({ path: path.join(output, 'theme-dark-sources.png'), fullPage: true });
     await page.getByLabel(/对话操作：离线示例A/).click();
     await page.getByRole('button', { name: '重命名', exact: true }).click();
-    assert.equal(await page.locator('.action-dialog').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(34, 34, 34)');
+    assert.equal(await page.locator('.action-dialog').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(38, 38, 38)');
     await page.screenshot({ path: path.join(output, 'theme-dark-dialog.png'), fullPage: true });
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '关闭资料面板', exact: true }).click();
@@ -973,7 +984,7 @@ try {
     await page.getByText('对话已移到回收站', { exact: true }).waitFor();
     await page.getByRole('button', { name: '回收站', exact: true }).click();
     await page.getByRole('button', { name: '恢复对话：重命名离线对话', exact: true }).click();
-    await page.getByText('已恢复 1 个对话；研究不会自动重启', { exact: true }).waitFor();
+    await page.getByText('已恢复 1 个对话', { exact: true }).waitFor();
     await page.getByRole('button', { name: '关闭回收站', exact: true }).click();
     assert.equal(await composer.inputValue(), '基础功能修复时保留的草稿');
     console.log('PASS rename keeps research question, current chat trash/undo/recycle restore and independent draft');

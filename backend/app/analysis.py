@@ -19,7 +19,7 @@ FIELD_LABELS = {
 ORIGIN_LABELS = {"author": "作者自述", "inference": "系统推断", "user": "用户要求"}
 MISSING_LABELS = {
     "not_available": "来源不可用", "not_read": "尚未读取", "not_found": "所提供片段中未找到",
-    "parse_failed": "解析失败", "not_applicable": "模型判断不适用（仍计入约定字段分母）",
+    "parse_failed": "解析失败", "not_applicable": "不适用",
 }
 CHUNK_SIZE = 3000
 INPUT_CHARS = 18000
@@ -192,17 +192,26 @@ def extract_result(payload, run, paper, inputs, previous=None):
 
 
 def screen_result(payload, run, papers, inputs_by_paper):
+    """逐篇校验；单篇结果无效只让该篇记为未纳入，不作废同批其他论文。"""
     output = ScreeningOutput.model_validate(payload)
-    ids = [s.paper_id for s in output.selections]
-    if len(set(ids)) != len(ids) or set(ids) != {p.id for p in papers}:
-        raise AnalysisError("筛选结果必须覆盖本次每篇候选论文")
-    evidence, selections = [], []
+    by_id = {}
     for selection in output.selections:
-        if not set(selection.subproblems) <= set(run.subproblems):
-            raise AnalysisError("筛选结果引用了未知子问题")
-        if selection.relevant and (not selection.subproblems or not selection.citations):
-            raise AnalysisError("相关论文必须关联子问题和实际依据")
-        refs = evidence_for(selection.citations, inputs_by_paper[selection.paper_id], selection.paper_id)
+        by_id.setdefault(selection.paper_id, selection)
+    evidence, selections = [], []
+    for paper in papers:
+        selection = by_id.get(paper.id)
+        try:
+            if selection is None:
+                raise AnalysisError("模型未返回该论文的筛选结果")
+            if not set(selection.subproblems) <= set(run.subproblems):
+                raise AnalysisError("筛选结果引用了未知子问题")
+            if selection.relevant and (not selection.subproblems or not selection.citations):
+                raise AnalysisError("相关论文必须关联子问题和实际依据")
+            refs = evidence_for(selection.citations, inputs_by_paper[paper.id], paper.id)
+        except AnalysisError as exc:
+            selections.append(PaperSelection(paper_id=paper.id, analysis_revision=run.analysis_revision,
+                relevant=False, reason="筛选结果无效：" + str(exc), reviewed=False, error=str(exc)))
+            continue
         evidence.extend(refs)
         selections.append(PaperSelection(**selection.model_dump(exclude={"citations"}),
             analysis_revision=run.analysis_revision, evidence_ids=[e.id for e in refs]))
@@ -249,7 +258,7 @@ def compare_experiments(analyses, groups):
         status = "not_comparable" if different else "insufficient" if missing else "comparable"
         result.append(Comparison(left_paper_id=left.paper_id, right_paper_id=right.paper_id,
             left_experiment_id=left.id, right_experiment_id=right.id, status=status,
-            reasons=different + missing or ["已提取条件一致；仍需人工核对原文与实验语义，不据此声称总体优劣"],
+            reasons=different + missing or ["已提取条件一致"],
             evidence_ids=list(dict.fromkeys(left.evidence_ids + right.evidence_ids)), metric=left.metric,
             left_value=left.value, right_value=right.value))
     return result
@@ -276,6 +285,10 @@ def evaluate(run, papers, analyses, selections):
     completeness = sum(rates.values()) / len(rates) if rates else 0.0
     gaps, actions = [], []
     unreviewed = set(groups) - {s.paper_id for s in selections if s.reviewed}
+    failed = [s for s in selections if s.error]
+    if failed:
+        gaps.append(f"{len(failed)}篇候选的筛选结果无效，未纳入")
+        actions.append("重新筛选结果无效的候选论文")
     if unreviewed:
         gaps.append(f"{len(unreviewed)}篇候选尚未完成相关性筛选，不能视为已纳入")
         actions.append("完成候选论文的相关性筛选")

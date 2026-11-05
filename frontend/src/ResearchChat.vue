@@ -41,7 +41,7 @@
       </div>
       <p v-if="historyError" class="error-message" role="alert">{{ historyError }}</p>
       <p v-if="historyLoading" class="muted" role="status">正在读取记录…</p>
-      <nav class="history-list" aria-label="历史研究对话">
+      <nav class="history-list" aria-label="历史研究对话" @scroll="onHistoryScroll">
         <section v-for="group in historyGroups" :key="group.label" class="history-group">
           <h2>{{ group.label }}</h2>
           <div v-for="task in group.tasks" :key="task.id" class="history-item" :class="{ selected: selectedKey === task.id }">
@@ -50,6 +50,7 @@
           </div>
         </section>
         <p v-if="historyLoaded && historyQuery.trim() && !historyGroups.length && !historyLoading" class="history-empty">没有找到相关对话，换个关键词试试。</p>
+        <button v-if="historyMore && !historyLoading" type="button" class="text-button history-more" @click="loadMoreHistory">加载更多对话</button>
       </nav>
       <div class="sidebar-actions">
       <button ref="trashButton" class="sidebar-settings" type="button" @click="openTrash"><UiIcon name="trash" />回收站<UiIcon name="chevronRight" /></button>
@@ -96,7 +97,7 @@
 
             <p v-if="conversationLoading" class="muted" role="status">正在读取对话…</p>
             <div v-if="conversationError" class="error-message" role="alert">
-              {{ conversationError }} 已有记录保留，可能不是最新。
+              {{ conversationError }}
               <button class="text-button" :disabled="currentPending?.busy" @click="retryConversation">重新读取对话</button>
             </div>
             <template v-if="conversation">
@@ -115,6 +116,43 @@
                 </section>
                 <article v-else class="message" :class="[entry.message.role, entry.message.status]" :aria-label="entry.message.role === 'user' ? '用户消息' : '助手消息'">
                   <div class="message-body">
+                    <div v-if="activityRun(entry.message)" class="turn-activity">
+                      <div class="activity-head">
+                        <details class="process-records" :open="processState(activityRun(entry.message)!.id).open" @toggle="onProcessToggle(activityRun(entry.message)!.id, $event)">
+                          <summary>
+                            <span class="process-label"><UiIcon name="process" />{{ activitySummary(activityRun(entry.message)!) }}</span>
+                            <span class="process-summary">{{ runLabels[activityRun(entry.message)!.status] }} · {{ stageLabels[activityRun(entry.message)!.stage] }} · {{ activityRun(entry.message)!.current_round }}/{{ activityRun(entry.message)!.max_rounds }} 轮</span>
+                          </summary>
+                          <div class="process-content">
+                            <p v-if="processState(activityRun(entry.message)!.id).loading" class="muted" role="status">正在读取过程记录…</p>
+                            <p v-if="processState(activityRun(entry.message)!.id).error" class="error-message" role="alert">{{ processState(activityRun(entry.message)!.id).error }} <button class="text-button" @click="loadProcess(activityRun(entry.message)!.id)">重试</button></p>
+                            <ol v-if="processState(activityRun(entry.message)!.id).events.length" class="event-list">
+                              <li v-for="event in processState(activityRun(entry.message)!.id).events" :key="event.id"><time>{{ formatTime(event.created_at) }}</time><span>{{ stageLabels[event.stage] }} · {{ event.category }}</span><p>{{ event.message }}</p></li>
+                            </ol>
+                            <p v-else-if="!processState(activityRun(entry.message)!.id).loading && !processState(activityRun(entry.message)!.id).error" class="muted">暂无已保存的执行记录。</p>
+                            <p v-if="activityRun(entry.message)!.stop_reason" class="muted">停止说明：{{ activityRun(entry.message)!.stop_reason }}</p>
+                            <ul v-if="activityRun(entry.message)!.gaps.length" class="gap-list"><li v-for="gap in activityRun(entry.message)!.gaps" :key="gap">{{ gap }}</li></ul>
+                          </div>
+                        </details>
+                        <div class="activity-actions">
+                          <details data-menu class="usage-details">
+                            <summary>用量<UiIcon name="chevronDown" /></summary>
+                            <div>
+                              <h3>本次会话用量</h3>
+                              <p>累计模型调用：{{ conversation?.usage.model_calls }}</p>
+                              <p>累计执行：{{ conversation?.usage.total_execution_seconds.toFixed(1) }} 秒</p>
+                              <p>Token：{{ tokenText(conversation?.usage.token_usage.total_tokens ?? null) }}</p>
+                              <p>输入 / 输出：{{ tokenText(conversation?.usage.token_usage.prompt_tokens ?? null) }} / {{ tokenText(conversation?.usage.token_usage.completion_tokens ?? null) }}</p>
+                              <p>本次运行外部调用：{{ activityRun(entry.message)!.total_calls }} / {{ activityRun(entry.message)!.max_calls }}</p>
+                              <p>本次运行执行上限：{{ activityRun(entry.message)!.max_seconds }} 秒</p>
+                              <p>本次运行轮次：{{ activityRun(entry.message)!.current_round }} / {{ activityRun(entry.message)!.max_rounds }}</p>
+                            </div>
+                          </details>
+                          <button v-if="canPauseRun(activityRun(entry.message)!)" :disabled="controlsDisabled" @click="sendControl('pause')">暂停</button>
+                          <button v-if="canResumeRun(activityRun(entry.message)!)" :disabled="controlsDisabled" @click="sendControl('resume')">继续</button>
+                        </div>
+                      </div>
+                    </div>
                     <template v-if="entry.message.content">
                       <p v-if="entry.message.role === 'user'" class="message-text" :title="formatTime(entry.message.created_at)">{{ entry.message.content }}</p>
                       <MessageMarkdown v-else :content="entry.message.content" />
@@ -136,59 +174,17 @@
                 </article>
               </template>
               <p v-if="!conversation.messages.length && !conversation.runs.length" class="muted">这条记录还没有对话或调研。可以在下方直接继续。</p>
-              <details v-if="latestRun" class="process-records" :open="processOpen" @toggle="onProcessToggle">
-                <summary><span class="process-label"><UiIcon name="chevronRight" />过程记录</span><span class="process-summary">{{ stageLabels[latestRun.stage] }} · {{ latestRun.current_round }}/{{ latestRun.max_rounds }} 轮</span></summary>
-                <div class="process-content">
-                  <p class="muted">这是后端执行记录，不是模型的思维过程。{{ runLabels[latestRun.status] }} · {{ stageLabels[latestRun.stage] }}</p>
-                  <p v-if="processLoading" class="muted" role="status">正在读取过程记录…</p>
-                  <p v-if="processError" class="error-message" role="alert">{{ processError }} <button class="text-button" @click="loadProcess">重试</button></p>
-                  <ol v-if="processEvents.length" class="event-list">
-                    <li v-for="event in processEvents" :key="event.id"><time>{{ formatTime(event.created_at) }}</time><span>{{ stageLabels[event.stage] }} · {{ event.category }}</span><p>{{ event.message }}</p></li>
-                  </ol>
-                  <p v-else-if="!processLoading && !processError" class="muted">暂无已保存的执行记录。</p>
-                  <p v-if="latestRun.stop_reason" class="muted">停止说明：{{ latestRun.stop_reason }}</p>
-                  <ul v-if="latestRun.gaps.length" class="gap-list"><li v-for="gap in latestRun.gaps" :key="gap">{{ gap }}</li></ul>
-                </div>
-              </details>
             </template>
           </div>
         </div>
         <footer class="composer-dock">
           <button v-if="!nearBottom && conversation" class="jump-bottom" @click="scrollToBottom"><UiIcon name="arrowDown" />回到最新消息</button>
           <p v-if="modelConfigured === false" class="model-note"><UiIcon name="info" /><span>{{ availableProviders.length ? '尚未选择模型，请在输入区选择要使用的型号。' : '请先配置AI服务，再选择对话使用的模型。' }}</span><button type="button" class="text-button" @click="availableProviders.length ? openModelPicker() : openSettings('model')">{{ availableProviders.length ? '选择模型' : '配置AI服务' }}</button></p>
-          <div v-if="conversation" class="execution-strip" aria-label="执行状态与用量">
-            <div class="execution-description">
-              <i :class="{ running: isResearchRunning }" aria-hidden="true"></i>
-              <strong>{{ conversation.busy ? '对话处理中' : latestRun ? runLabels[latestRun.status] : '可以继续对话' }}</strong>
-              <span v-if="latestRun && isResearchRunning">{{ stageLabels[latestRun.stage] }}</span>
-            </div>
-            <div class="execution-actions">
-              <details data-menu class="usage-details">
-                <summary>用量<UiIcon name="chevronDown" /></summary>
-                <div>
-                  <h3>本次会话用量</h3>
-                  <p>累计模型调用：{{ conversation.usage.model_calls }}</p>
-                  <p>累计执行：{{ conversation.usage.total_execution_seconds.toFixed(1) }} 秒</p>
-                  <p>Token：{{ tokenText(conversation.usage.token_usage.total_tokens) }}</p>
-                  <p>输入 / 输出：{{ tokenText(conversation.usage.token_usage.prompt_tokens) }} / {{ tokenText(conversation.usage.token_usage.completion_tokens) }}</p>
-                  <template v-if="latestRun">
-                    <p>当前运行外部调用：{{ latestRun.total_calls }} / {{ latestRun.max_calls }}</p>
-                    <p>当前运行执行上限：{{ latestRun.max_seconds }} 秒</p>
-                    <p>当前轮次：{{ latestRun.current_round }} / {{ latestRun.max_rounds }}</p>
-                  </template>
-                  <p class="muted">未知 token 不记为零；暂停等待不计执行时间。</p>
-                </div>
-              </details>
-              <button v-if="canPause" :disabled="controlsDisabled" @click="sendControl('pause')">暂停</button>
-              <button v-if="canResume" :disabled="controlsDisabled" @click="sendControl('resume')">继续</button>
-            </div>
-          </div>
           <div v-if="currentPending" class="pending-notice" role="status">
-            <div><strong>{{ currentPending.busy ? '正在发送…' : '发送未确认' }}</strong><p>{{ currentPending.error || '消息确认前保留草稿，不会重复提交。' }}</p><blockquote v-if="!currentPending.busy">{{ currentPending.content }}</blockquote></div>
+            <div><strong>{{ currentPending.busy ? '正在发送…' : '发送未确认' }}</strong><p>{{ currentPending.error || '等待服务确认，草稿已保留。' }}</p><blockquote v-if="!currentPending.busy">{{ currentPending.content }}</blockquote></div>
             <button v-if="!currentPending.busy" class="text-button" aria-label="重试发送" @click="retrySend">重试原消息</button>
           </div>
           <p v-if="sendErrors[selectedKey]" class="error-message" role="alert">{{ sendErrors[selectedKey] }}</p>
-          <div v-if="notice" class="workspace-notice" :class="{ 'notice-error': noticeError }" :role="noticeError ? 'alert' : 'status'"><span>{{ notice }}</span><button v-if="undoTask" type="button" class="text-button" :disabled="conversationActionBusy" @click="restoreTask(undoTask.id)">撤销删除</button><button type="button" class="icon-button" aria-label="关闭提示" @click="notice = ''; undoTask = null"><UiIcon name="close" /></button></div>
           <form class="composer" @submit.prevent="sendDraft">
             <label class="sr-only" for="chat-input">输入消息</label>
             <textarea id="chat-input" ref="inputElement" v-model="draft" :maxlength="inputLimit" rows="2" :placeholder="selectedKey === NEW_CHAT ? '描述你想研究的问题' : '继续提问，或补充研究方向'" :title="preferences.sendShortcut === 'enter' ? 'Enter 发送，Shift + Enter 换行' : 'Ctrl / ⌘ + Enter 发送，Enter 换行'" aria-label="输入消息" @keydown="handleInputKey"></textarea>
@@ -208,13 +204,12 @@
               </div>
               <div class="send-group">
                 <span v-if="draft.length" class="char-count">{{ draft.length }}/{{ inputLimit }}</span>
-                <button v-if="activeRun || conversation?.busy" type="button" class="send-button stop-button" aria-label="停止" :title="stopBusy ? '正在停止…' : '停止当前工作'" :disabled="!!currentPending || stopBusy" @click="stopWork"><UiIcon name="stop" /></button>
+                <button v-if="isResearchRunning || conversation?.busy" type="button" class="send-button stop-button" aria-label="停止" :title="stopBusy ? '正在停止…' : '停止当前工作'" :disabled="!!currentPending || stopBusy" @click="stopWork"><UiIcon name="stop" /></button>
                 <button v-if="!conversation?.busy && (!isResearchRunning || draft.trim())" type="submit" class="send-button" aria-label="发送消息" :disabled="!canSend"><UiIcon name="arrowUp" /></button>
               </div>
             </div>
           </form>
           <div class="composer-footnote">
-            <span><UiIcon name="shield" />回答与引用请结合原文核查</span>
             <button type="button" class="model-status" title="AI服务与模型选择" @click="availableProviders.length && !modelConfigured ? openModelPicker() : openSettings('model')">{{ modelConfigured === true ? '模型已配置' : modelConfigured === false ? availableProviders.length ? '请选择模型' : '配置AI服务' : healthError ? '连接状态未知 · 设置' : 'AI服务' }}</button>
           </div>
         </footer>
@@ -259,7 +254,6 @@
             <PaperDetailView v-if="paperDetail" :detail="paperDetail" :run-id="paperSelection.runId" :citation="selectedCitation" @back="clearPaper" @citation="selectedCitation = $event" />
           </template>
           <template v-else>
-            <p class="panel-note">本次检索保存的论文。元数据、摘要与实际全文读取范围在详情中分开标记。</p>
             <button v-for="(paper, index) in artifact?.papers || []" :key="paper.id" class="paper-row" @click="openPaper(paper.id)">
               <span class="paper-number">{{ String(index + 1).padStart(2, '0') }}</span>
               <span class="paper-copy"><span class="paper-title">{{ paper.title }}</span><small>{{ paper.year ?? '年份缺失' }} · {{ paper.authors.slice(0, 2).join('、') || '作者缺失' }}{{ paper.authors.length > 2 ? ' 等' : '' }}</small><span class="paper-link">查看来源与读取状态</span></span>
@@ -274,10 +268,8 @@
             <div class="report-heading"><h3>报告快照</h3><div class="report-downloads"><button :disabled="downloadBusy" class="download-button" @click="downloadReport('md')">下载 .md</button><button v-if="artifact.report.document" :disabled="downloadBusy" class="download-button" @click="downloadReport('docx')">Word</button><button v-if="artifact.report.document" :disabled="downloadBusy" class="download-button" @click="downloadReport('pdf')">PDF</button></div></div>
             <p class="report-title">{{ artifact.report.title }}</p>
             <p v-if="downloadError" class="error-message" role="alert">{{ downloadError }}</p>
-            <p class="panel-note">三个格式绑定当前报告 ID。引用定位可核查，语义支持仍需人工复核；阶段性结果不代表覆盖充分。</p>
             <div v-if="artifact.report.document" class="report-claims">
               <section v-for="section in artifact.report.document.sections" :key="section.title"><h4>{{ section.title }}</h4><div v-for="(claim, index) in section.claims" :key="index"><p><small>{{ originLabels[claim.origin] }}</small> {{ claim.text }}</p><button v-for="(id, evidenceIndex) in claim.evidence_ids" :key="id" class="text-button" @click="openReportEvidence(id)">查看依据 {{ evidenceIndex + 1 }}</button></div></section>
-              <p class="panel-note">{{ artifact.report.document.semantic_review }}</p>
             </div>
             <ul v-if="artifact.report.gaps.length" class="gap-list"><li v-for="gap in artifact.report.gaps" :key="gap">{{ gap }}</li></ul>
             <p v-if="artifact.report.stop_reason" class="muted">停止说明：{{ artifact.report.stop_reason }}</p>
@@ -288,9 +280,14 @@
       </div>
     </aside>
   </main>
+  <Teleport to="body">
+    <Transition name="toast">
+      <div v-if="notice" :key="noticeKey" class="toast" :class="{ 'toast-error': noticeError }" :role="noticeError ? 'alert' : 'status'" @mouseenter="holdNotice" @mouseleave="scheduleNotice" @focusin="holdNotice" @focusout="scheduleNotice"><UiIcon :name="noticeError ? 'info' : 'check'" /><span>{{ notice }}</span><button v-if="undoTask" type="button" class="text-button" :disabled="conversationActionBusy" @click="restoreTask(undoTask.id)">撤销删除</button><button type="button" class="icon-button" aria-label="关闭提示" @click="clearNotice"><UiIcon name="close" /></button></div>
+    </Transition>
+  </Teleport>
   <SettingsDialog :open="settingsOpen" :initial-tab="settingsInitialTab" :conversation="conversation" @close="closeSettings" @open-trash="openTrashFromSettings" @saved="applyModelSettings" @busy="settingsBusy = $event" @notice="setNotice" />
   <TrashDialog :open="trashOpen" @close="closeTrash" @restored="applyRestoredTasks" @deleted="applyDeletedTasks" @notice="setNotice" />
-  <ActionDialog v-if="conversationAction" :title="conversationAction.kind === 'rename' ? '重命名对话' : '删除这个对话？'" :description="conversationAction.kind === 'rename' ? '只修改会话名称，研究问题和历史资料保持不变。' : '对话将移到回收站，可随时恢复；正在执行的对话和调研会停止。'" :confirm-label="conversationAction.kind === 'rename' ? '保存名称' : '移到回收站'" :editable="conversationAction.kind === 'rename'" :initial-value="taskTitle(conversationAction.task).slice(0, 120)" :danger="conversationAction.kind === 'trash'" :busy="conversationActionBusy" :error="conversationActionError" @close="conversationAction = null" @confirm="confirmConversationAction" />
+  <ActionDialog v-if="conversationAction" :title="conversationAction.kind === 'rename' ? '重命名对话' : '删除这个对话？'" :description="conversationAction.kind === 'rename' ? '' : '对话将移到回收站，可随时恢复；正在执行的对话和调研会停止。'" :confirm-label="conversationAction.kind === 'rename' ? '保存名称' : '移到回收站'" :editable="conversationAction.kind === 'rename'" :initial-value="taskTitle(conversationAction.task).slice(0, 120)" :danger="conversationAction.kind === 'trash'" :busy="conversationActionBusy" :error="conversationActionError" @close="closeConversationAction" @confirm="confirmConversationAction" />
 </template>
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
@@ -321,7 +318,14 @@ const modelMenu = ref<HTMLDetailsElement | null>(null);
 const notice = ref('');
 const noticeError = ref(false);
 const undoTask = ref<Task | null>(null);
-function setNotice(message: string, error = false, undo: Task | null = null) { notice.value = message; noticeError.value = error; undoTask.value = undo; }
+const noticeKey = ref(0);
+let noticeTimer: number | undefined;
+function clearNotice() { window.clearTimeout(noticeTimer); notice.value = ''; undoTask.value = null; }
+function holdNotice() { window.clearTimeout(noticeTimer); }
+// 带撤销的提示留更久，给出操作时间。
+function scheduleNotice() { window.clearTimeout(noticeTimer); if (notice.value && !noticeError.value) noticeTimer = window.setTimeout(clearNotice, undoTask.value ? 8000 : 4000); }
+// 错误提示需用户关闭；期间的普通提示不顶替它，带撤销的除外。
+function setNotice(message: string, error = false, undo: Task | null = null) { if (!error && !undo && noticeError.value && notice.value) return; notice.value = message; noticeError.value = error; undoTask.value = undo; noticeKey.value += 1; scheduleNotice(); }
 
 const settingsOpen = ref(false);
 const settingsInitialTab = ref<'general' | 'model'>('general');
@@ -389,8 +393,42 @@ const sortedRuns = computed(() => [...(conversation.value?.runs || [])].sort((a,
 const latestRun = computed(() => sortedRuns.value[0]);
 const activeRun = computed(() => sortedRuns.value.find(run => !terminal.has(run.status)));
 const isResearchRunning = computed(() => !!activeRun.value && running.has(activeRun.value.status));
-const canPause = computed(() => !!activeRun.value && ['queued', 'running'].includes(activeRun.value.status));
-const canResume = computed(() => !!activeRun.value && ['paused', 'needs_input'].includes(activeRun.value.status));
+// 暂停／继续按所属运行判断，随内联活动行一起出现在该回合内。
+const canPauseRun = (run: Run) => ['queued', 'running'].includes(run.status);
+const canResumeRun = (run: Run) => ['paused', 'needs_input'].includes(run.status);
+const runsById = computed(() => new Map((conversation.value?.runs || []).map(run => [run.id, run])));
+// 同一次运行可能产生多条助手消息：模型回答先保存并带上 run_id，随后 record_run 再追加一条
+// 同 run_id 的运行状态摘要。执行活动属于该运行的模型回答，因此挂在最早的那条消息上，
+// 显示在回答之前；若挂到最后一条会跑到回答下方，与执行先于结论的顺序相反。
+const activityRunIds = computed(() => {
+  const firstMessageByRun = new Map<string, string>();
+  for (const message of conversation.value?.messages || []) {
+    const runId = message.run_id;
+    if (runId && runsById.value.has(runId) && !firstMessageByRun.has(runId)) firstMessageByRun.set(runId, message.id);
+  }
+  const ids = new Map<string, Run>();
+  for (const [runId, messageId] of firstMessageByRun) ids.set(messageId, runsById.value.get(runId)!);
+  // 运行中尚未产生回答消息时（run_id 要到 finish 才写入），活动先挂在排队中的助手占位消息上。
+  const pending = (conversation.value?.messages || []).find(message => message.role === 'assistant' && message.status !== 'completed' && !message.run_id);
+  if (activeRun.value && pending && !firstMessageByRun.has(activeRun.value.id)) ids.set(pending.id, activeRun.value);
+  return ids;
+});
+const activityRun = (message: ChatMessage): Run | null => activityRunIds.value.get(message.id) || null;
+const elapsedText = (seconds: number) => {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const rest = total % 60;
+  if (hours) return `${hours}h ${minutes}m ${rest}s`;
+  if (minutes) return `${minutes}m ${rest}s`;
+  return rest === 0 ? '<1s' : `${rest}s`;
+};
+// 与 Codex 的一次运行摘要同形：已用时间 · 外部调用 · 模型调用。只用运行自身已保存的计数，
+// 不推断尚未加载的资料数量。
+const activitySummary = (run: Run) => {
+  const parts = [`已用 ${elapsedText(run.total_execution_seconds)}`];
+  if (run.total_calls) parts.push(`外部调用 ${run.total_calls}/${run.max_calls}`);
+  if (run.model_calls) parts.push(`模型调用 ${run.model_calls}`);
+  return parts.join(' · ');
+};
 const controlsDisabled = computed(() => stopBusy.value || !!currentPending.value || !!conversation.value?.busy);
 const selectedRunId = computed(() => selectedRuns[selectedKey.value] || latestRun.value?.id || '');
 const selectedRun = computed(() => conversation.value?.runs.find(run => run.id === selectedRunId.value));
@@ -443,12 +481,15 @@ const paperDetail = ref<PaperDetail | null>(null);
 const selectedCitation = ref<ChatCitation | null>(null);
 const paperLoading = ref(false);
 const paperError = ref('');
-const processOpen = ref(false);
-const processEvents = ref<RunEvent[]>([]);
-let processRunId = '';
-let processLoaded = false;
-const processLoading = ref(false);
-const processError = ref('');
+interface RunProcess { open: boolean; loaded: boolean; loading: boolean; error: string; events: RunEvent[]; }
+const EMPTY_PROCESS: RunProcess = { open: false, loaded: false, loading: false, error: '', events: [] };
+// 每个研究运行各自保存展开状态与已读记录；轮询刷新不改变读者已展开的轮次。
+const runProcess = reactive<Record<string, RunProcess>>({});
+// 渲染期只读取，不在这里创建条目，避免在 patch 过程中修改响应式状态。
+function processState(runId: string): RunProcess { return runProcess[runId] || EMPTY_PROCESS; }
+function writableProcess(runId: string): RunProcess {
+  return runProcess[runId] || (runProcess[runId] = { open: false, loaded: false, loading: false, error: '', events: [] });
+}
 const downloadBusy = ref(false);
 const downloadError = ref('');
 let disposed = false;
@@ -456,7 +497,8 @@ let viewVersion = 0;
 let pollVersion = 0;
 let artifactVersion = 0;
 let paperVersion = 0;
-let processVersion = 0;
+const processVersions = new Map<string, number>();
+const processControllers = new Map<string, AbortController>();
 let historyVersion = 0;
 let historyWriteVersion = 0;
 const writeVersions: Record<string, number> = {};
@@ -464,7 +506,6 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollController: AbortController | null = null;
 let artifactController: AbortController | null = null;
 let paperController: AbortController | null = null;
-let processController: AbortController | null = null;
 let historyController: AbortController | null = null;
 let sendController: AbortController | null = null;
 let stopController: AbortController | null = null;
@@ -571,8 +612,13 @@ function applyConversation(data: ConversationView, shouldScroll: boolean) {
   if (selectedKey.value === data.task.id) void scrollIfNeeded(shouldScroll, previousHeight);
 }
 function stopPolling() { pollVersion++; if (pollTimer !== null) clearTimeout(pollTimer); pollTimer = null; pollController?.abort(); pollController = null; }
-function abortMaterials() { artifactVersion++; artifactController?.abort(); artifactLoading.value = false; processVersion++; processController?.abort(); processLoading.value = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); }
-function beginView() { closeMenus(); viewVersion++; stopPolling(); sendController?.abort(); stopController?.abort(); stopBusy.value = false; abortMaterials(); conversationLoading.value = false; conversationError.value = ''; artifactError.value = ''; processError.value = ''; downloadError.value = ''; processEvents.value = []; processRunId = ''; processLoaded = false; processOpen.value = false; panelOpen.value = false; sidebarOpen.value = false; }
+function abortMaterials() { artifactVersion++; artifactController?.abort(); artifactLoading.value = false; abortProcesses(); downloadController?.abort(); downloadBusy.value = false; clearPaper(); }
+function abortProcesses() {
+  for (const [runId, controller] of processControllers) { processVersions.set(runId, (processVersions.get(runId) || 0) + 1); controller.abort(); }
+  processControllers.clear();
+  for (const state of Object.values(runProcess)) state.loading = false;
+}
+function beginView() { closeMenus(); viewVersion++; stopPolling(); sendController?.abort(); stopController?.abort(); stopBusy.value = false; abortMaterials(); conversationLoading.value = false; conversationError.value = ''; artifactError.value = ''; downloadError.value = ''; for (const key of Object.keys(runProcess)) delete runProcess[key]; panelOpen.value = false; sidebarOpen.value = false; }
 function newConversation() { historyQuery.value = ''; beginView(); selectedKey.value = NEW_CHAT; nearBottom.value = true; void nextTick(() => { scrollToBottom(); inputElement.value?.focus(); }); }
 function selectConversation(taskId: string, acknowledged?: ConversationView) {
   const fromSidebar = compactLayout.value && sidebarOpen.value;
@@ -586,16 +632,32 @@ async function pollConversation() {
   const version = viewVersion; const cycle = pollVersion; const write = writeVersions[key] || 0;
   const controller = new AbortController(); pollController = controller; conversationLoading.value = !views[key];
   const active = () => !disposed && version === viewVersion && cycle === pollVersion && selectedKey.value === key && write === (writeVersions[key] || 0) && !controller.signal.aborted;
-  try { const data = await getConversation(key, controller.signal); if (!active()) return; applyConversation(data, nearBottom.value); conversationError.value = ''; if (panelOpen.value) await loadArtifacts(); if (processOpen.value) await loadProcess(); }
+  try { const data = await getConversation(key, controller.signal); if (!active()) return; applyConversation(data, nearBottom.value); conversationError.value = ''; if (panelOpen.value) await loadArtifacts(); await refreshOpenProcesses(); }
   catch (error) { if (active()) conversationError.value = `读取对话失败：${errorText(error)}`; }
   finally { if (active()) { conversationLoading.value = false; pollController = null; schedulePolling(); } }
 }
 function retryConversation() { if (stopBusy.value || currentPending.value?.busy) return; stopPolling(); conversationError.value = ''; void pollConversation(); }
-async function refreshHistory() {
+const HISTORY_PAGE = 50;
+const historyMore = ref(false);
+// 分页按查询分别计数；搜索结果并入本地列表，侧栏仍按关键词在本地筛选显示。
+let historySearch = '';
+let historyOffset = 0;
+let historyQueryTimer: number | undefined;
+function mergeTasks(data: Task[]) {
+  const byId = new Map(data.map(task => [task.id, task]));
+  for (const task of tasks.value) { const item = byId.get(task.id); if (!item || item.updated_at <= task.updated_at) byId.set(task.id, task); }
+  tasks.value = [...byId.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+function refreshHistory() { return loadHistory(false); }
+function loadMoreHistory() { if (historyMore.value && !historyLoading.value) void loadHistory(true); }
+function onHistoryScroll(event: Event) { const element = event.target as HTMLElement; if (element.scrollHeight - element.scrollTop - element.clientHeight < 80) loadMoreHistory(); }
+watch(historyQuery, () => { window.clearTimeout(historyQueryTimer); historyLoading.value = true; historyQueryTimer = window.setTimeout(() => void loadHistory(false), 250); });
+async function loadHistory(more: boolean) {
   historyController?.abort(); const controller = new AbortController(); historyController = controller;
   const version = ++historyVersion; const write = historyWriteVersion; historyLoading.value = true; historyError.value = '';
-  try { const received = await getConversations(controller.signal); const data = received.filter(task => !trashedIds.has(task.id)); if (disposed || version !== historyVersion) return; if (write === historyWriteVersion) tasks.value = data; else { const byId = new Map(data.map(task => [task.id, task])); for (const task of tasks.value) { const item = byId.get(task.id); if (!item || item.updated_at <= task.updated_at) byId.set(task.id, task); } tasks.value = [...byId.values()].sort((a,b) => b.updated_at.localeCompare(a.updated_at)); } historyLoaded.value = true; }
-  catch (error) { if (!disposed && version === historyVersion && !controller.signal.aborted) historyError.value = `读取记录失败：${errorText(error)}。现有历史仍保留。`; }
+  const query = more ? historySearch : historyQuery.value.trim(); const offset = more ? historyOffset : 0;
+  try { const received = await getConversations({ query, offset, limit: HISTORY_PAGE }, controller.signal); const data = received.filter(task => !trashedIds.has(task.id)); if (disposed || version !== historyVersion) return; if (!more && !query && write === historyWriteVersion) tasks.value = data; else mergeTasks(data); historySearch = query; historyOffset = offset + received.length; historyMore.value = received.length === HISTORY_PAGE; historyLoaded.value = true; }
+  catch (error) { if (!disposed && version === historyVersion && !controller.signal.aborted) historyError.value = `读取记录失败：${errorText(error)}`; }
   finally { if (!disposed && version === historyVersion) historyLoading.value = false; }
 }
 async function sendDraft() {
@@ -634,7 +696,7 @@ async function transmit(key: string) {
   } catch (error) {
     if (disposed) return;
     if (error instanceof ApiError && error.status >= 400 && error.status < 500) { sendErrors[key] = `消息未被接受：${errorText(error)}。草稿仍保留。`; delete pending[key]; }
-    else request.error = controller.signal.aborted ? '已切换对话，请求结果未确认。返回后重试原消息，沿用同一请求标识。' : `${errorText(error)}。服务可能已接收；重试原消息不会新建重复请求。`;
+    else request.error = controller.signal.aborted ? '已切换对话，发送结果未确认，可重试原消息。' : `${errorText(error)}。服务可能已接收，可重试原消息。`;
   } finally { request.busy = false; if (sendController === controller) sendController = null; if (!disposed && version === viewVersion && selectedKey.value === key) schedulePolling(); }
 }
 async function loadModelSettings() {
@@ -673,7 +735,12 @@ function applyDeletedTasks(ids: string[]) {
   }
   if (ids.includes(undoTask.value?.id || '')) undoTask.value = null;
 }
-function openConversationAction(kind: 'rename' | 'trash', task: Task) { closeMenus(); conversationActionError.value = ''; conversationAction.value = { kind, task }; }
+let actionReturnFocus: HTMLElement | null = null;
+function openConversationAction(kind: 'rename' | 'trash', task: Task) { actionReturnFocus = (document.activeElement as HTMLElement | null)?.closest('details')?.querySelector('summary') || null; closeMenus(); conversationActionError.value = ''; conversationAction.value = { kind, task }; }
+function closeConversationAction() {
+  conversationAction.value = null;
+  void nextTick(() => { const target = actionReturnFocus?.isConnected && actionReturnFocus.getClientRects().length ? actionReturnFocus : inputElement.value; target?.focus(); actionReturnFocus = null; });
+}
 async function confirmConversationAction(title: string) {
   const action = conversationAction.value;
   if (!action || conversationActionBusy.value) return;
@@ -698,7 +765,7 @@ async function confirmConversationAction(title: string) {
       if (selectedKey.value === id) newConversation();
       setNotice('对话已移到回收站', false, task);
     }
-    if (conversationAction.value === action) conversationAction.value = null;
+    if (conversationAction.value === action) closeConversationAction();
   } catch (error) {
     if (!disposed) { const message = errorText(error); if (conversationAction.value === action) conversationActionError.value = message; else setNotice(message, true); }
   } finally { conversationActionBusy.value = false; if (selectedKey.value === id) schedulePolling(); }
@@ -710,7 +777,7 @@ async function restoreTask(id: string) {
     const task = await restoreConversation(id, pageController.signal);
     if (disposed) return;
     applyRestoredTasks([task]);
-    setNotice('对话已恢复；已停止的工作不会自动重启');
+    setNotice('对话已恢复');
   } catch (error) { if (!disposed) setNotice(`恢复失败：${errorText(error)}`, true); }
   finally { conversationActionBusy.value = false; }
 }
@@ -760,25 +827,37 @@ async function loadPaper() {
   catch (error) { if (active()) paperError.value = `读取论文详情失败：${errorText(error)}`; }
   finally { if (active()) paperLoading.value = false; }
 }
-function onProcessToggle(event: Event) { processOpen.value = (event.target as HTMLDetailsElement).open; if (processOpen.value) void loadProcess(); else { processVersion++; processController?.abort(); processLoading.value = false; } }
-async function loadProcess() {
-  if (!processOpen.value || !latestRun.value) return;
-  processController?.abort(); const controller = new AbortController(); processController = controller;
-  const version = ++processVersion; const view = viewVersion; const runId = latestRun.value.id;
-  if (processRunId !== runId) { processRunId = runId; processLoaded = false; processEvents.value = []; processError.value = ''; }
-  const active = () => !disposed && view === viewVersion && version === processVersion && !controller.signal.aborted;
-  processLoading.value = !processLoaded;
+function onProcessToggle(runId: string, event: Event) {
+  const state = writableProcess(runId);
+  state.open = (event.target as HTMLDetailsElement).open;
+  if (state.open) void loadProcess(runId);
+  else { processVersions.set(runId, (processVersions.get(runId) || 0) + 1); processControllers.get(runId)?.abort(); processControllers.delete(runId); state.loading = false; }
+}
+// 轮询后照常刷新已展开的记录（沿用原行为），但不改变折叠状态。已读过一次的记录在后台刷新时
+// 不显示占位段落，因此不会改变时间线高度或读者的滚动位置。
+async function refreshOpenProcesses() {
+  await Promise.all(Object.keys(runProcess).filter(runId => runProcess[runId].open).map(runId => loadProcess(runId)));
+}
+async function loadProcess(runId: string) {
+  const state = writableProcess(runId);
+  if (!state.open) return;
+  processControllers.get(runId)?.abort();
+  const controller = new AbortController(); processControllers.set(runId, controller);
+  const version = (processVersions.get(runId) || 0) + 1; processVersions.set(runId, version);
+  const view = viewVersion;
+  const active = () => !disposed && view === viewVersion && version === processVersions.get(runId) && !controller.signal.aborted;
+  state.loading = !state.loaded;
   try {
     const data = await getRunEvents(runId, controller.signal);
     if (active()) {
       const previousHeight = timelineElement.value?.scrollHeight;
       const shouldScroll = nearBottom.value;
-      processEvents.value = data; processLoaded = true; processError.value = ''; processLoading.value = false;
+      state.events = data; state.loaded = true; state.error = ''; state.loading = false;
       void scrollIfNeeded(shouldScroll, previousHeight);
     }
   }
-  catch (error) { if (active()) processError.value = `读取过程失败：${errorText(error)}`; }
-  finally { if (active()) processLoading.value = false; }
+  catch (error) { if (active()) state.error = `读取过程失败：${errorText(error)}`; }
+  finally { if (active()) { state.loading = false; if (processControllers.get(runId) === controller) processControllers.delete(runId); } }
 }
 async function downloadReport(format: 'md' | 'docx' | 'pdf') {
   if (downloadBusy.value || !selectedRunId.value || !artifact.value?.report) return;
@@ -801,7 +880,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', resizeInput);
   compactQuery.removeEventListener('change', onLayoutChange);
   document.removeEventListener('keydown', handleOverlayKey);
-  disposed = true; stopPolling(); abortMaterials(); sendController?.abort(); stopController?.abort(); historyController?.abort(); pageController.abort();
+  disposed = true; window.clearTimeout(noticeTimer); window.clearTimeout(historyQueryTimer); stopPolling(); abortMaterials(); sendController?.abort(); stopController?.abort(); historyController?.abort(); pageController.abort();
 });
 </script>
 <style src="./workspace.css"></style>

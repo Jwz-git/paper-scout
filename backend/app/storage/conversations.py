@@ -7,6 +7,9 @@ from backend.app.storage.database import StateConflict
 
 ACTIVE = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.PAUSE_REQUESTED,
           RunStatus.PAUSED, RunStatus.NEEDS_INPUT}
+STATUS_TEXT = {RunStatus.PAUSED: "已暂停", RunStatus.NEEDS_INPUT: "等待补充", RunStatus.COMPLETED: "已完成",
+               RunStatus.PARTIAL: "已结束，形成阶段性资料", RunStatus.FAILED: "失败", RunStatus.CANCELLED: "已停止",
+               RunStatus.INTERRUPTED: "已中断"}
 SUMMARY = {RunStatus.PAUSED, RunStatus.NEEDS_INPUT, RunStatus.COMPLETED,
            RunStatus.PARTIAL, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.INTERRUPTED}
 
@@ -39,7 +42,6 @@ class ConversationStore:
                     content = "原始问题：" + json.dumps(task.topic,ensure_ascii=False)
                     raw_scope = {k:getattr(task,k) for k in TaskInput.model_fields if k != "topic"}
                     content += "\n原始范围：" + json.dumps(raw_scope,ensure_ascii=False)
-                    content += "\n（历史任务输入原样展示，未按当前规则校验；启动研究时才校验范围。）"
                 self.save_message(ChatMessage(id="chat_"+uuid4().hex, task_id=task_id,
                     role="user", content=content, status="completed", created_at=task.created_at))
                 for run in runs:
@@ -146,9 +148,9 @@ class ConversationStore:
                 answer.content, answer.action, answer.run_id = decision.content,decision.action,decision.run_id
                 answer.citations = decision.citations
             elif error == "user_cancelled":
-                answer.content = "用户已停止本轮对话。原始消息已保存，迟到的模型结果不会应用；已发出的调用仍可能完成并计入用量。"
+                answer.content = "已停止本轮对话。"
             else:
-                answer.content = ("对话处理已中断，不会自动重放可能付费的调用。" if interrupted else "对话处理失败："+error+"。原始消息已保存；暂停的研究不会自动继续。")
+                answer.content = "对话处理已中断。" if interrupted else f"回复失败（{error}），可以重试。"
                 if diagnostic and not interrupted:
                     answer.content += "\n" + diagnostic
             self.save_message(answer)
@@ -160,7 +162,10 @@ class ConversationStore:
             for turn in turns:
                 conn.execute("UPDATE conversation_turns SET paused_by_dialogue=0 WHERE rowid=?", (turn["rowid"],))
                 self.finish(turn,error="user_cancelled",interrupted=True)
-            active = [r for r in self.db.list_runs(task_id=task_id) if r.status in ACTIVE]
+            # 停止的是正在进行的工作：执行中的研究，以及被本轮对话临时暂停的研究；用户自己暂停或等待补充的研究保留。
+            owned = {t["run_id"] for t in turns if t["paused_by_dialogue"]}
+            working = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.PAUSE_REQUESTED}
+            active = [r for r in self.db.list_runs(task_id=task_id) if r.status in working or (r.id in owned and r.status in ACTIVE)]
             for run in active:
                 self.db.cancel_run(run.id)
             if turns or active:
@@ -184,14 +189,14 @@ class ConversationStore:
             conn.execute("INSERT INTO conversation_run_states VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET signature=excluded.signature", (run.id,signature))
             if run.status not in SUMMARY:
                 return
-            content = f"系统运行摘要（非模型回答）：研究 {run.id} 状态为 {run.status.value}。"
+            content = f"研究{STATUS_TEXT[run.status]}。"
             if run.stop_reason:
                 content += "\n"+run.stop_reason
             if report:
-                label = "研究报告" if run.status == RunStatus.COMPLETED else "阶段性来源报告"
-                content += f"\n{label}已保存，可在研究资料中查看；原文定位可核验，语义支持仍未核验。"
+                label = "研究报告" if run.status == RunStatus.COMPLETED else "阶段性报告"
+                content += f"\n{label}已保存，可在研究资料中查看。"
             if run.status == RunStatus.PAUSED:
-                content += "\n已保存检查点，可以在对话中继续补充或明确继续。"
+                content += "\n可以补充方向或继续研究。"
             if run.gaps:
                 content += "\n缺口：" + "；".join(run.gaps[:5])
             self.save_message(ChatMessage(id="chat_"+uuid4().hex,task_id=run.task_id,role="assistant",content=content,status="completed",run_id=run.id))

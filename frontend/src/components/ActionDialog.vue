@@ -3,7 +3,7 @@
     <dialog ref="element" class="action-dialog" aria-labelledby="action-dialog-title" @cancel.prevent="emit('close')" @click="outside">
       <form @submit.prevent="emit('confirm', value)">
         <header><h2 id="action-dialog-title">{{ title }}</h2><button type="button" class="icon-button" aria-label="关闭对话操作" @click="emit('close')"><UiIcon name="close" /></button></header>
-        <p>{{ description }}</p>
+        <p v-if="description">{{ description }}</p>
         <label v-if="editable" class="action-input-label">对话名称<input v-model="value" required maxlength="120" aria-label="对话名称" /></label>
         <p v-if="error" class="error-message" role="alert">{{ error }}</p>
         <footer><button type="button" @click="emit('close')">取消</button><button type="submit" :class="{ danger }" :disabled="busy || (editable && !value.trim())">{{ busy ? '处理中…' : confirmLabel }}</button></footer>

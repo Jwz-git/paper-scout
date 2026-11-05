@@ -31,7 +31,7 @@ flowchart LR
 - 本机AI服务文件原子保存并优先于环境配置。已知旧单模型及profiles结构读取时迁移，协议／地址／凭据完全相同才合并为一家供应商，保留当前型号和不同凭据。旧文件直到下一次保存才改写。
 - FastAPI 负责输入、查询、消息排队、启动、暂停、补充、继续和取消请求，返回持久化状态。一次运行保留最初输入和按时间追加的补充信息；暂停后继续同一运行，终态后的重新执行创建新运行。
 - worker 与 FastAPI 共用应用 lifespan，在同一进程串行处理对话和研究。异步外部调用不会以同步等待阻塞 HTTP；首期仅一个后端进程／worker，不使用每请求 BackgroundTasks 或分布式队列。
-- SQLite 保存任务、运行、查询、论文、证据和报告元数据；运行文件保存在本地 `data/`，用户导出到 `reports/`。SQLite 适用本地单机和低写入并发；事务不跨网络请求。
+- SQLite 保存任务、运行、查询、论文、证据和报告元数据；数据库与本机 AI 服务设置保存在 `DATA_DIR`（默认 `data/`）；报告导出由浏览器直接下载，服务端不另存导出文件。SQLite 适用本地单机和低写入并发；事务不跨网络请求。
 - 检索、模型和 PDF 各自提供窄接口；检索源负责转换外部格式，业务规则不放入适配器。首期接入 arXiv；目标网络的可达性仍需实际验证。
 - 云端模型协议分别实现 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 适配器，用户选择协议、服务地址、模型与凭据；不同服务对可选能力的支持需要单独核验，不假定完全兼容。
 - 研究分析由 `analysis.py` 处理结构化输出、输入范围与引用验证、论文分组、实验可比性和覆盖口径；`engine.py` 控制筛选、读取、提取、评估、综合与检查点。适配器仍只负责协议请求，不承载研究规则。
@@ -51,24 +51,27 @@ flowchart LR
 | 评估 | 目标、论文、证据和执行限制 | 覆盖结果、缺口、继续或终止原因 |
 | 报告 | 经检查的分析与来源 | 可读报告与参考文献 |
 
-## 目录建议
+## 目录结构
 
 ```text
-backend/
-  app/api/          # 路由和请求响应
-  app/domain/       # 类型、状态与业务规则
-  app/workflow/     # 编排、阶段和执行限制
-  app/adapters/     # 检索、模型、PDF
-  app/storage/      # SQLite 和本地文件
-frontend/
-  src/views/        # 任务、执行、结果页面
-  src/components/
-  src/api/          # 后端 HTTP 客户端
-  src/types/
-tests/              # 关键行为测试、脱敏固定样本
+backend/app/
+  api/              # 路由和请求响应
+  domain/           # 类型与状态
+  workflow/         # 状态机与串行 worker
+  adapters/         # arXiv、模型、PDF 获取与解析
+  storage/          # SQLite 与会话持久化
+  analysis.py       # 筛选、提取、比较与评估规则
+  dialogue.py       # 对话动作与追问来源
+  reports.py        # 报告快照与三格式渲染
+  model_settings.py # 本机 AI 服务设置
+frontend/src/
+  components/       # 对话之外的资料区、设置、回收站等组件
+  composables/      # 主题、偏好与菜单关闭
+  api/              # 后端 HTTP 客户端
+tests/              # 关键行为测试、浏览器回归脚本
 ```
 
-仅在实际编码时创建需要的目录。数据库迁移、打包方式及开发命令随工程初始化确定并写入 README，不能宣称现已支持。
+运行与开发命令见 [README](<../README.md>)。
 
 ## 内容及安全边界
 

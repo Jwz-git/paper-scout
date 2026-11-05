@@ -70,11 +70,12 @@ def test_two_papers_are_partial_not_semantically_complete(store):
     assert all(store.get_evidence(p.id, "r") for p in store.get_papers_by_run("r"))
 
 
-def test_empty_results_fail_without_a_fake_report(store):
+def test_empty_results_are_reported_not_failed(store):
     make_run(store)
     final = asyncio.run(WorkflowEngine(store,arxiv_adapter=Search([])).execute_run("r"))
-    assert final.status == RunStatus.FAILED
-    assert store.get_report("r") is None
+    assert final.status == RunStatus.PARTIAL
+    report = store.get_report("r")
+    assert report.document.papers == [] and report.gaps[0] == "检索没有找到符合范围的论文"
 
 
 def test_planning_json_failure_keeps_safe_diagnostic_and_usage(store):
@@ -153,7 +154,7 @@ def test_call_limit_stops_model_and_preserves_existing_results(store):
     make_run(store,max_calls=0)
     model=Model([])
     final=asyncio.run(WorkflowEngine(store,llm_adapter=model).execute_run("r"))
-    assert final.status == RunStatus.FAILED
+    assert final.status == RunStatus.PARTIAL
     assert final.total_calls == 0 and not model.requests
     assert "调用次数" in final.stop_reason
 
@@ -165,7 +166,7 @@ def test_total_time_limit_terminates_inflight_request(store):
             await kwargs["on_request"]()
             await asyncio.Event().wait()
     final=asyncio.run(WorkflowEngine(store,arxiv_adapter=Slow()).execute_run("r"))
-    assert final.status == RunStatus.FAILED and final.total_calls == 1
+    assert final.status == RunStatus.PARTIAL and final.total_calls == 1
     assert "时间" in final.stop_reason
     assert store.list_queries("r")[0].error_category == "execution_limit"
 
@@ -325,3 +326,20 @@ def test_process_cancel_during_requested_pause_is_interrupted(store):
             await task
         assert store.get_run("r").status==RunStatus.INTERRUPTED
     asyncio.run(scenario())
+
+
+def test_model_driven_run_waits_for_model_instead_of_running_without_it(store):
+    run = make_run(store, status=RunStatus.QUEUED)
+    run.model_calls = 2
+    store.update_run(run)
+    final = asyncio.run(WorkflowEngine(store, arxiv_adapter=Search()).execute_run("r"))
+    assert final.status == RunStatus.NEEDS_INPUT and "模型" in final.stop_reason
+    assert final.total_calls == 0
+
+
+def test_no_model_query_uses_keywords_not_exact_sentence(store):
+    topic = "graph neural networks for molecule generation"
+    store.create_run(Run(id="r",task_id="t",initial_topic=topic,initial_input=TaskInput(topic=topic)))
+    search = Search()
+    asyncio.run(WorkflowEngine(store,arxiv_adapter=search).execute_run("r"))
+    assert search.calls[0] == "all:graph AND all:neural AND all:networks AND all:molecule AND all:generation"

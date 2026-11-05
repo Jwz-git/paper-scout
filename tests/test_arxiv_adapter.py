@@ -122,12 +122,30 @@ def test_search_uses_mock_transport_and_exact_query_parameters():
 
 
 @pytest.mark.parametrize("status,body,code", [(200, ERROR_FEED, "api_error"), (429, "rate limited", "rate_limited"),
-                                             (503, "unavailable", "http_error"), (200, "<bad", "invalid_xml")])
+                                             (503, "unavailable", "server_error"), (404, "missing", "http_error"),
+                                             (200, "<bad", "invalid_xml")])
 def test_search_service_failure_is_explicit_with_mock_transport(status, body, code):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(status, text=body))) as client:
-            adapter = ArXivAdapter(rate_limit_seconds=0, client=client)
+            adapter = ArXivAdapter(rate_limit_seconds=0, client=client, retry_delay_seconds=0)
             with pytest.raises(ArXivError) as error:
                 await adapter.search("ti:agent")
             assert error.value.code == code
+    asyncio.run(run())
+
+
+def test_transient_failures_retry_with_each_attempt_counted():
+    responses = [httpx.Response(429), httpx.Response(503), httpx.Response(200, text=SAMPLE)]
+    counted = []
+    async def on_request():
+        counted.append(1)
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: responses.pop(0))) as client:
+            adapter = ArXivAdapter(rate_limit_seconds=0, client=client, retry_delay_seconds=0)
+            papers = await adapter.search("ti:agent", on_request=on_request)
+            assert papers and len(counted) == 3
+            responses.extend([httpx.Response(503)] * 3)
+            with pytest.raises(ArXivError):
+                await adapter.search("ti:agent", on_request=on_request)
+            assert len(counted) == 6 and not responses
     asyncio.run(run())

@@ -14,12 +14,11 @@ def blocks(report):
     doc = report.document
     yield "heading", (1, report.title)
     yield "paragraph", f"报告 ID：{report.id}；范围修订：{doc.analysis_revision}；生成时间：{report.created_at.isoformat()}"
-    yield "paragraph", doc.semantic_review
     yield "heading", (2, "研究范围与执行记录")
     yield "paragraph", f"研究问题：{doc.scope.topic}；年份：{doc.scope.start_year or '不限'}—{doc.scope.end_year or '不限'}"
     yield "paragraph", f"关注维度：{'、'.join(doc.scope.focus_dimensions) or '六类基础字段'}"
     if doc.scope.output_requirements:
-        yield "paragraph", "用户输出要求（不是论文事实）：" + doc.scope.output_requirements
+        yield "paragraph", "用户输出要求：" + doc.scope.output_requirements
     yield "paragraph", f"实际外部调用：{doc.total_calls}；模型调用：{doc.model_calls}；Token：{doc.token_usage.get('total_tokens') if doc.token_usage.get('total_tokens') is not None else '未知'}"
     yield "paragraph", f"分析截至快照的执行时间：{doc.execution_seconds:.2f}秒；执行上限/操作性门槛：" + "；".join(f"{key}={value:g}" for key, value in doc.limits.items())
     yield "paragraph", "终止原因：" + (report.stop_reason or "未提供")
@@ -29,12 +28,14 @@ def blocks(report):
         for claim in section.claims:
             yield "paragraph", f"[{ORIGIN_LABELS[claim.origin]}] {claim.text} [证据：{', '.join(claim.evidence_ids)}]"
     if not doc.sections:
-        yield "paragraph", "尚未完成模型综合；以下为已经保存的来源与分析，不是完整研究结论。"
+        yield "paragraph", "尚未完成模型综合，以下为已保存的来源与分析。"
     yield "heading", (2, "纳入与排除")
-    titles = {p.id: p.title for p in doc.papers}
+    titles = {p.id: p.title for p in doc.papers + doc.excluded_papers}
+    urls = {p.id: p.url for p in doc.papers + doc.excluded_papers}
     for selection in doc.selections:
         label = "纳入" if selection.relevant else "排除" if selection.reviewed else "未审阅"
-        yield "paragraph", f"{titles.get(selection.paper_id, selection.paper_id)}：{label}；{selection.reason}；子问题：{'、'.join(selection.subproblems) or '无'} [证据：{', '.join(selection.evidence_ids) or '无'}]"
+        link = f"（{urls[selection.paper_id]}）" if selection.paper_id in urls else ""
+        yield "paragraph", f"{titles.get(selection.paper_id, selection.paper_id)}{link}：{label}；{selection.reason}；子问题：{'、'.join(selection.subproblems) or '无'} [证据：{', '.join(selection.evidence_ids) or '无'}]"
     yield "heading", (2, "论文信息与实际阅读")
     analyzed = {a.paper_id: a for a in doc.analyses}
     for paper in doc.papers:
@@ -42,12 +43,12 @@ def blocks(report):
         yield "paragraph", f"{paper.id}；来源 {paper.url}；获取于 {paper.fetched_at.isoformat()}"
         for source in doc.sources:
             if source.paper_id == paper.id:
-                yield "paragraph", f"保存的来源：{source.source_type.value}；快照 {source.source_text_id}；页 {source.page_number or '不适用'}；状态 {source.status}；{source.original_length}字符（保存/解析不等于模型已读）"
+                yield "paragraph", f"保存的来源：{source.source_type.value}；快照 {source.source_text_id}；页 {source.page_number or '不适用'}；状态 {source.status}；{source.original_length}字符"
         analysis = analyzed.get(paper.id)
         if analysis is None:
-            yield "paragraph", "未完成结构化提取；只能核查已保存原文。"
+            yield "paragraph", "未完成结构化提取。"
             continue
-        yield "paragraph", f"分析状态：{analysis.status}；{analysis.error or '引用定位已校验，语义支持未人工核验'}"
+        yield "paragraph", f"分析状态：{analysis.status}" + (f"；{analysis.error}" if analysis.error else "")
         rows = []
         for field in analysis.fields:
             rows.append([FIELD_LABELS.get(field.field_name, field.field_name), field.value or MISSING_LABELS.get(field.missing_reason.value if field.missing_reason else '', '缺失'), ORIGIN_LABELS[field.origin] + ("；" + field.note if field.note else ''), ', '.join(field.evidence_ids) or '无'])
@@ -63,9 +64,9 @@ def blocks(report):
             yield "paragraph", f"{titles.get(comparison.left_paper_id, comparison.left_paper_id)} 与 {titles.get(comparison.right_paper_id, comparison.right_paper_id)}：{COMPARISON_LABELS[comparison.status]}"
             yield "paragraph", f"{comparison.metric or '指标缺失'}：{comparison.left_value or '缺失'} / {comparison.right_value or '缺失'}；{'；'.join(comparison.reasons)} [证据：{', '.join(comparison.evidence_ids)}]"
         if not assessment.comparisons:
-            yield "paragraph", "没有可组成同指标跨论文比较的实验记录；不能据此推断方法优劣。"
+            yield "paragraph", "没有同指标的跨论文实验记录。"
         yield "heading", (2, "覆盖与字段缺口")
-        yield "paragraph", f"操作性规则：{assessment.rule}；不是准确率或全领域覆盖证明。"
+        yield "paragraph", f"操作性规则：{assessment.rule}"
         for sub, papers in assessment.supporting_papers.items():
             yield "paragraph", f"{sub}：{len(papers)}个有依据的论文组；{', '.join(papers) or '无'}"
         for pid, (n, d) in assessment.field_counts.items():
@@ -75,7 +76,6 @@ def blocks(report):
     yield "heading", (2, "缺口、冲突与局限")
     for gap in report.gaps:
         yield "paragraph", gap
-    yield "paragraph", "同字段的不同值保留并列，可能是实验条件或原文冲突，不自动选取最大值。arXiv为单一预印本来源；复杂表格、未提供片段及扫描件须人工核查，不做OCR。"
     yield "heading", (2, "证据与参考文献")
     for evidence in doc.evidence:
         yield "paragraph", f"证据 {evidence.id}；论文 {evidence.paper_id}；快照 {evidence.source_text_id}；页 {evidence.page_number or '不适用'}；字符[{evidence.location_start},{evidence.location_end})"

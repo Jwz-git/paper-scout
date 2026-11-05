@@ -162,14 +162,14 @@ def test_no_model_discloses_simple_initial_and_preserves_natural_followup(db):
     rid = db.list_runs(tid)[0].id
     service.store.enqueue(req("只看低资源场景","supplement"),tid)
     complete(service)
-    assert db.get_run(rid).status == RunStatus.PAUSED
+    assert db.get_run(rid).status == RunStatus.QUEUED
     assert len(db.list_runs(tid)) == 1 and service.store.usage(tid).model_calls == 0
     assert next(m for m in reversed(service.store.messages(tid)) if m.role == "user").content == "只看低资源场景"
     assert turn_answer(service.store,tid).action == "clarify"
     service.store.enqueue(req("回答已有资料","ask","ask"),tid)
     complete(service)
     assert turn_answer(service.store,tid).action == "clarify"
-    assert db.get_run(rid).status == RunStatus.PAUSED
+    assert db.get_run(rid).status == RunStatus.QUEUED
     for i,mode in enumerate(("resume","pause","cancel")):
         service.store.enqueue(req(mode,str(i),mode),tid)
         complete(service)
@@ -187,7 +187,7 @@ def test_legacy_true_initial_input_and_durable_real_summaries(db):
     db.transition("r",[RunStatus.PAUSED],RunStatus.QUEUED)
     db.pause_run("r")
     assert len(store.view("t",False).messages) == len(first.messages)+1
-    assert "系统运行摘要（非模型回答）" in store.messages("t")[-1].content
+    assert store.messages("t")[-1].content.startswith("研究已暂停")
 
 
 def test_model_auto_clarifies_then_research_uses_bounded_history(db):
@@ -303,9 +303,8 @@ def test_valid_saved_snapshot_answer_restores_only_owned_existing_research(db):
     complete(service)
     answer = turn_answer(store,"t")
     assert answer.status == "completed" and answer.citations[0].quote == "Literal evidence."
-    assert "语义支持尚未核验" in answer.content
     assert db.get_run("active").status == RunStatus.QUEUED and len(db.list_runs("t")) == 2
-    assert db.list_queries("active") == [] and "原先正在进行的研究在检查点后继续" in answer.content
+    assert db.list_queries("active") == []
     context = model.requests[0]["sources"][0]
     assert context["truncated"] and context["original_length"] > len(context["content"])
 
@@ -324,7 +323,7 @@ def test_model_intent_and_scope_boundary_has_no_generic_success(db,mode,decision
     store.enqueue(req("input","intent",mode),"t")
     complete(DialogueService(db,Model([decision])))
     assert turn_answer(store,"t").status == "failed"
-    assert db.get_run("r").status == RunStatus.PAUSED and not db.list_run_messages("r")
+    assert db.get_run("r").status == RunStatus.QUEUED and not db.list_run_messages("r")
 
 
 def test_terminal_new_research_preserves_old_run_and_transcript(db):
@@ -339,25 +338,23 @@ def test_terminal_new_research_preserves_old_run_and_transcript(db):
     assert store.messages("t")[:len(before)] == before
 
 
-@pytest.mark.parametrize("limit", ["calls","seconds"])
-def test_cumulative_dialogue_budget_blocks_model_without_touching_run_budget(db,limit):
+def test_dialogue_usage_is_cumulative_statistics_not_a_lifetime_lock(db):
     store = legacy(db)
     store.ensure("t")
     usage = store.usage("t")
-    if limit == "calls": usage.model_calls=usage.max_calls
-    else: usage.total_execution_seconds=usage.max_seconds
+    usage.model_calls, usage.total_execution_seconds = 1000, 100000.0
     store.save_usage("t",usage)
-    model = Model([])
+    model = Model([{"action":"clarify","content":"需要哪方面？"}])
     store.enqueue(req("input","budget"),"t")
     complete(DialogueService(db,model))
-    assert not model.requests and turn_answer(store,"t").error_category == "conversation_budget_exhausted"
-    assert db.get_run("r").total_calls == 0 and db.get_run("r").status == RunStatus.PAUSED
+    assert len(model.requests) == 1 and turn_answer(store,"t").status == "completed"
+    assert store.usage("t").model_calls == 1001 and db.get_run("r").total_calls == 0
 
 
-def test_timeout_and_failed_call_usage_unknown_is_not_zero(db):
+def test_timeout_and_failed_call_usage_unknown_is_not_zero(db, monkeypatch):
     store = legacy(db)
     store.ensure("t")
-    usage = store.usage("t"); usage.max_seconds=0.01; store.save_usage("t",usage)
+    monkeypatch.setattr("backend.app.dialogue.TURN_SECONDS", 0.01)
     class Waiting:
         async def generate(self,*args,**kwargs):
             await asyncio.Event().wait()
@@ -423,7 +420,7 @@ def test_json_diagnostic_is_visible_without_response_or_automatic_retry(db, text
     assert diagnostic in answer.content and "private_marker" not in answer.content
     assert len(calls) == 1 and store.next_turn() is None
     assert store.usage("t").model_calls == 1 and store.usage("t").token_usage["total_tokens"] == 12
-    assert db.get_run("r").status == RunStatus.PAUSED and db.get_run("r").total_calls == 0
+    assert db.get_run("r").status == RunStatus.QUEUED and db.get_run("r").total_calls == 0
 
 
 def test_fenced_json_does_not_bypass_dialogue_field_validation(db):
@@ -443,7 +440,7 @@ def test_fenced_json_does_not_bypass_dialogue_field_validation(db):
     answer = turn_answer(store, "t")
     assert answer.status == "failed" and answer.error_category == "ValidationError"
     assert len(calls) == 1 and store.usage("t").model_calls == 1
-    assert db.get_run("r").status == RunStatus.PAUSED and db.get_run("r").total_calls == 0
+    assert db.get_run("r").status == RunStatus.QUEUED and db.get_run("r").total_calls == 0
     assert len(db.list_runs("t")) == 1 and db.list_run_messages("r") == []
     assert store.next_turn() is None
 
@@ -593,7 +590,6 @@ def test_invalid_legacy_task_without_runs_can_be_viewed_without_revalidation(cli
     assert not view["runs"] and not view["busy"]
     assert len(view["messages"]) == 1 and view["messages"][0]["role"] == "user"
     assert '原始问题：""' in view["messages"][0]["content"]
-    assert "未按当前规则校验" in view["messages"][0]["content"]
     assert client.get("/api/conversations/invalid-legacy").json() == view
     assert db.get_task("invalid-legacy").topic == "" and not db.list_runs("invalid-legacy")
 
@@ -611,7 +607,7 @@ def test_stop_queued_turn_before_any_paid_call_and_stale_worker_claim(db):
     assert service.store.message(stale["user_id"]).content == "Agents"
     answer = service.store.message(stale["assistant_id"])
     assert answer.status == "interrupted" and answer.error_category == "user_cancelled"
-    assert "用户已停止本轮对话" in answer.content
+    assert "已停止本轮对话" in answer.content
     assert service.store.enqueue(req(create=True)) == tid and service.store.next_turn() is None
 
 
@@ -721,3 +717,25 @@ def test_stop_api_initial_router_without_run_can_stop_and_retry_safely(client):
     assert view["messages"][1]["status"] == "interrupted"
     assert client.post("/api/conversations",json=payload).json() == view
     assert client.post(f"/api/conversations/{tid}/stop").json() == view
+
+
+def test_followup_sources_rotate_across_papers_instead_of_first_paper_fulltext(db):
+    store = legacy(db,RunStatus.PARTIAL)
+    papers = [Paper(id=f"p{i}",source_id=f"p{i}",title=f"Study {i}",url=f"https://arxiv.org/abs/p{i}") for i in range(3)]
+    db.save_papers(papers,"r")
+    for p in papers:
+        db.save_source_texts([SourceText(id=f"{p.id}-a",paper_id=p.id,source_type=SourceType.ABSTRACT,content="abstract "+p.id)]
+            + [SourceText(id=f"{p.id}-{n}",paper_id=p.id,source_type=SourceType.FULLTEXT,page_number=n,content="y"*5000) for n in range(1,9)],"r")
+    sources = DialogueService(db).sources(db.list_runs("t"))
+    assert [s["source_text_id"] for s in sources[:3]] == ["p0-a","p1-a","p2-a"]
+    assert {s["paper_id"] for s in sources[3:6]} == {"p0","p1","p2"}
+    assert sum(len(s["content"]) for s in sources) <= 24000 and len(sources) <= 24
+
+
+def test_stop_keeps_research_the_user_paused_but_cancels_running_work(db):
+    store = legacy(db,RunStatus.PAUSED)
+    store.stop("t")
+    assert db.get_run("r").status == RunStatus.PAUSED
+    db.transition("r",[RunStatus.PAUSED],RunStatus.QUEUED)
+    store.stop("t")
+    assert db.get_run("r").status == RunStatus.CANCELLED

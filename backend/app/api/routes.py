@@ -189,7 +189,7 @@ async def papers(run_id: str, db=Depends(get_db)):
     return db.get_papers_by_run(run_id, selected_only=True)
 
 
-@router.get("/runs/{run_id}/papers/{paper_id}")
+@router.get("/runs/{run_id}/papers/{paper_id:path}")
 async def paper_detail(run_id: str, paper_id: str, db=Depends(get_db)):
     run = require_run(db, run_id)
     paper = next((p for p in db.get_papers_by_run(run_id) if p.id==paper_id), None)
@@ -256,8 +256,9 @@ def report_pdf(run_id: str, report_id: Optional[str] = None, db=Depends(get_db))
 
 
 @router.get("/conversations", response_model=List[Task])
-async def conversations(limit: int = Query(100, ge=1, le=100), deleted: bool = False, db=Depends(get_db)):
-    return db.list_tasks(limit, deleted=deleted)
+async def conversations(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0),
+                        query: str = Query("", max_length=2000), deleted: bool = False, db=Depends(get_db)):
+    return db.list_tasks(limit, deleted=deleted, offset=offset, query=query.strip())
 
 
 class ConversationRenameRequest(BaseModel):

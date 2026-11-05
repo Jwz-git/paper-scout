@@ -57,7 +57,7 @@ def validate_pdf_url(url: str, allowed_domains: Optional[set] = None) -> None:
 
 class PDFAdapter:
     def __init__(self, max_bytes: int = MAX_DOWNLOAD_BYTES, max_pages: int = MAX_PAGES_LIMIT,
-                 timeout_seconds: float = 30.0, *, parse_timeout_seconds: float = 10.0,
+                 timeout_seconds: float = 30.0, *, parse_timeout_seconds: float = 30.0,
                  max_redirects: int = 5, allowed_domains: Optional[set] = None,
                  transport: Optional[httpx.AsyncBaseTransport] = None):
         self.max_bytes = max_bytes
@@ -126,7 +126,8 @@ class PDFAdapter:
                 process.kill()
                 await process.communicate()
         if process.returncode != 0:
-            raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
+            # 子进程异常退出（如畸形文件耗尽内存）只影响这篇论文的全文。
+            raise PdfError("parse_failed", "PDF 解析子进程异常退出。")
         return self._source_texts(json.loads(stdout), paper_id, source_url)
 
     def extract_from_bytes(self, data: bytes, paper_id: str, source_url: Optional[str] = None) -> List[SourceText]:

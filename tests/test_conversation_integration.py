@@ -78,7 +78,7 @@ def test_conversation_http_worker_report_and_saved_source_followup(tmp_path):
             assert run["status"] == "partial" and run["total_calls"] == 5
             assert view["usage"]["model_calls"] == 1
             assert search.calls == 1 and len(model.requests) == 5
-            assert any("阶段性来源报告已保存" in m["content"] for m in view["messages"])
+            assert any("阶段性报告已保存" in m["content"] for m in view["messages"])
             report = client.get(f"/api/runs/{run['id']}/report.md")
             assert report.status_code == 200 and "Artificial integration fixture" in report.text
             retried = client.post("/api/conversations", json=first)

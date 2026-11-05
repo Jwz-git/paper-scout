@@ -37,9 +37,9 @@
         </template>
       </div>
 
-      <div class="trash-bottom"><p><UiIcon name="info" />恢复不会自动执行研究；彻底删除后无法找回。</p><div v-if="page.matched" class="trash-pagination"><span>{{ offset + 1 }}–{{ Math.min(offset + PAGE_SIZE, page.matched) }} / {{ page.matched }}</span><button type="button" class="icon-button" aria-label="回收站上一页" :disabled="unavailable || offset === 0" @click="offset -= PAGE_SIZE"><UiIcon name="chevronRight" class="trash-previous" /></button><button type="button" class="icon-button" aria-label="回收站下一页" :disabled="unavailable || offset + PAGE_SIZE >= page.matched" @click="offset += PAGE_SIZE"><UiIcon name="chevronRight" /></button></div></div>
+      <div class="trash-bottom"><p><UiIcon name="info" />彻底删除后无法找回。</p><div v-if="page.matched" class="trash-pagination"><span>{{ offset + 1 }}–{{ Math.min(offset + PAGE_SIZE, page.matched) }} / {{ page.matched }}</span><button type="button" class="icon-button" aria-label="回收站上一页" :disabled="unavailable || offset === 0" @click="offset -= PAGE_SIZE"><UiIcon name="chevronRight" class="trash-previous" /></button><button type="button" class="icon-button" aria-label="回收站下一页" :disabled="unavailable || offset + PAGE_SIZE >= page.matched" @click="offset += PAGE_SIZE"><UiIcon name="chevronRight" /></button></div></div>
     </dialog>
-    <ActionDialog v-if="confirmation && open" :title="confirmation.kind === 'restore' ? '恢复全部对话？' : confirmation.ids === null ? '清空回收站？' : `彻底删除 ${confirmation.count} 个对话？`" :description="confirmation.kind === 'restore' ? `将恢复回收站中的全部 ${confirmation.count} 个对话。已停止的研究不会自动重启。` : `${confirmation.ids === null ? `将永久删除回收站中的全部 ${confirmation.count} 个对话` : `将永久删除所选 ${confirmation.count} 个对话`}及其消息、研究记录和报告。此操作无法撤销。`" :confirm-label="confirmation.kind === 'restore' ? '全部恢复' : confirmation.ids === null ? '确认清空' : '彻底删除'" :danger="confirmation.kind === 'delete'" :busy="busy" :error="error" @close="confirmation = null" @confirm="confirmAction" />
+    <ActionDialog v-if="confirmation && open" :title="confirmation.kind === 'restore' ? '恢复全部对话？' : confirmation.ids === null ? '清空回收站？' : `彻底删除 ${confirmation.count} 个对话？`" :description="confirmation.kind === 'restore' ? `将恢复回收站中的全部 ${confirmation.count} 个对话。` : `${confirmation.ids === null ? `将永久删除回收站中的全部 ${confirmation.count} 个对话` : `将永久删除所选 ${confirmation.count} 个对话`}及其消息、研究记录和报告。此操作无法撤销。`" :confirm-label="confirmation.kind === 'restore' ? '全部恢复' : confirmation.ids === null ? '确认清空' : '彻底删除'" :danger="confirmation.kind === 'delete'" :busy="busy" :error="error" @close="confirmation = null" @confirm="confirmAction" />
   </Teleport>
 </template>
 
@@ -97,7 +97,7 @@ async function perform(kind: 'restore' | 'delete', ids: string[] | null) {
     let count: number;
     if (kind === 'restore') { const result = await restoreTrash(ids); count = result.tasks.length; emit('restored', result.tasks); }
     else { const result = await deleteTrash(ids); count = result.ids.length; emit('deleted', result.ids); }
-    const resultMessage = kind === 'restore' ? `已恢复 ${count} 个对话；研究不会自动重启` : `已彻底删除 ${count} 个对话`;
+    const resultMessage = kind === 'restore' ? `已恢复 ${count} 个对话` : `已彻底删除 ${count} 个对话`;
     confirmation.value = null;
     if (props.open) { message.value = resultMessage; await load(); }
     else emit('notice', resultMessage, false);

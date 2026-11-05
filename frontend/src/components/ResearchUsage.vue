@@ -11,13 +11,7 @@
         <section class="usage-section" aria-labelledby="conversation-usage-title">
           <div class="usage-section-heading"><h4 id="conversation-usage-title">对话消耗</h4><span>本会话累计</span></div>
           <p class="usage-description">意图理解、需求澄清和资料问答的模型用量。</p>
-          <div class="usage-meters" aria-label="对话用量">
-            <div v-for="metric in conversationMetrics" :key="metric.label" class="usage-meter">
-              <div class="usage-meter-title"><span>{{ metric.label }}</span><span :class="{ 'usage-reached': metric.used >= metric.limit }">{{ metric.used >= metric.limit ? '已达上限' : `剩余 ${formatMetric(metric.limit - metric.used, metric.time)}` }}</span></div>
-              <div class="usage-meter-value"><strong>{{ formatMetric(metric.used, metric.time) }}</strong><span>/ {{ formatMetric(metric.limit, metric.time) }}</span></div>
-              <div class="usage-track" role="progressbar" :aria-label="`对话${metric.label}`" aria-valuemin="0" :aria-valuemax="metric.limit" :aria-valuenow="Math.min(metric.used, metric.limit)" :aria-valuetext="`${formatMetric(metric.used, metric.time)}，上限 ${formatMetric(metric.limit, metric.time)}`"><span :style="{ width: percent(metric.used, metric.limit) }" :class="{ 'usage-reached': metric.used >= metric.limit }"></span></div>
-            </div>
-          </div>
+          <dl class="usage-token-row usage-totals" aria-label="对话用量"><div><dt>模型调用</dt><dd>{{ formatMetric(conversation.usage.model_calls, false) }}</dd></div><div><dt>执行时间</dt><dd>{{ duration(conversation.usage.total_execution_seconds) }}</dd></div></dl>
           <dl class="usage-token-row" aria-label="对话 Token"><div><dt>Token 总量</dt><dd>{{ token(conversation.usage.token_usage.total_tokens) }}</dd></div><div><dt>输入 Token</dt><dd>{{ token(conversation.usage.token_usage.prompt_tokens) }}</dd></div><div><dt>输出 Token</dt><dd>{{ token(conversation.usage.token_usage.completion_tokens) }}</dd></div></dl>
         </section>
 
@@ -45,14 +39,14 @@
     </div>
 
     <div v-else class="usage-limits">
-      <p class="usage-limits-intro">服务端提供的执行上限，当前仅供查看。已有对话和调研的实际上限可在用量概览中查看。</p>
+      <p class="usage-limits-intro">执行上限由服务端设置，此处只读。</p>
       <section v-for="scope in limitScopes" :key="scope.title" class="usage-limit-section">
         <div class="usage-limit-heading"><span><UiIcon :name="scope.icon" /></span><div><h4>{{ scope.title }}</h4><p>{{ scope.description }}</p></div></div>
         <dl class="usage-limit-rows"><div v-for="item in scope.items" :key="item.label"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div></dl>
       </section>
     </div>
 
-    <details class="usage-accounting"><summary><UiIcon name="info" /><span>用量如何计算</span><UiIcon name="chevronDown" /></summary><ul><li>暂停等待不计入实际执行时间；已发出的失败请求仍计入调用次数。</li><li>Token 显示“未知”表示未取得完整统计，不会按 0 计入。</li><li>切换模型、暂停或继续研究，都不会重置累计用量。</li><li>执行上限用于控制资源消耗，不代表研究质量；这里不估算费用。</li></ul></details>
+    <details class="usage-accounting"><summary><UiIcon name="info" /><span>用量如何计算</span><UiIcon name="chevronDown" /></summary><ul><li>暂停等待不计入实际执行时间；已发出的失败请求仍计入调用次数。</li><li>Token 显示“未知”表示服务未返回完整统计。</li><li>切换模型、暂停或继续研究，都不会重置累计用量。</li></ul></details>
   </section>
 </template>
 
@@ -82,18 +76,14 @@ function duration(seconds: number) {
 }
 const formatMetric = (value: number, time: boolean) => time ? duration(value) : `${value.toLocaleString()} 次`;
 const percent = (used: number, limit: number) => `${Math.min(100, used / limit * 100)}%`;
-const conversationMetrics = computed(() => props.conversation ? [
-  { label: '模型调用', used: props.conversation.usage.model_calls, limit: props.conversation.usage.max_calls, time: false },
-  { label: '执行时间', used: props.conversation.usage.total_execution_seconds, limit: props.conversation.usage.max_seconds, time: true },
-] : []);
 const researchMetrics = computed(() => selectedRun.value ? [
   { label: '外部调用', used: selectedRun.value.total_calls, limit: selectedRun.value.max_calls, time: false },
   { label: '执行时间', used: selectedRun.value.total_execution_seconds, limit: selectedRun.value.max_seconds, time: true },
 ] : []);
 const limitScopes = computed(() => [
-  { title: '每个对话', icon: 'chat' as const, description: '意图理解、澄清与问答累计计算。', items: [
-    { label: '模型调用', value: `${props.limits.conversation.max_calls} 次` },
-    { label: '实际执行时间', value: duration(props.limits.conversation.max_seconds) },
+  { title: '每轮对话', icon: 'chat' as const, description: '意图理解、澄清与问答，每轮单独计算。', items: [
+    { label: '每轮模型调用', value: `${props.limits.conversation.calls_per_turn} 次` },
+    { label: '每轮最长执行', value: `${props.limits.conversation.seconds_per_turn} 秒` },
   ] },
   { title: '每次调研', icon: 'book' as const, description: '每次新调研独立计量，同次继续保留累计消耗。', items: [
     { label: '迭代轮次', value: `${props.limits.research.max_rounds} 轮` },

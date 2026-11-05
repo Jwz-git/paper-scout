@@ -62,7 +62,6 @@ def test_catalog_api_retains_key_without_writing_or_generating(client, monkeypat
     assert requests == [('https://offline.example/v1', 'openai_chat', 'artificial-secret', None)]
     assert 'artificial-secret' not in response.text
     assert client.app.state.model_settings.path.read_bytes() == before
-    assert client.app.state.model_settings.diagnostic_calls == 0
     changed = client.post('/api/settings/models', json={**request, 'base_url': 'https://another.example/v1'})
     assert changed.status_code == 422 and len(requests) == 1
     assert client.post('/api/settings/models', json={**request, 'api_key': {'value': 'artificial-secret'}}).status_code == 422

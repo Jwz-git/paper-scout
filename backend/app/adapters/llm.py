@@ -75,6 +75,8 @@ class BaseLLMAdapter(ABC):
                 raise LLMError("authentication_failed", "模型服务鉴权失败，请检查凭据。")
             if response.status_code == 429:
                 raise LLMError("rate_limited", "模型服务限流或配额不足。")
+            if response.status_code >= 500:
+                raise LLMError("server_error", f"模型服务暂时不可用，HTTP {response.status_code}。")
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise LLMError("http_error", f"模型服务失败，HTTP {exc.response.status_code}。") from exc

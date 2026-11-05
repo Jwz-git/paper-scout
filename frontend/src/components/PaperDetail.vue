@@ -22,7 +22,7 @@
       <p v-if="detail.selected === false" class="muted">这篇论文保留在历史中，当前范围不再纳入。</p>
       <p v-if="detail.selection" class="muted">{{ detail.selection.reviewed ? '筛选依据' : '尚未语义筛选' }}：{{ detail.selection.reason }}</p>
       <template v-if="detail.analysis">
-        <p class="muted">范围修订 {{ detail.analysis.analysis_revision }} · {{ detail.analysis.status === 'completed' ? '结构化提取已保存' : '分析未完成' }}。定位校验不代表语义支持已核验。</p>
+        <p class="muted">范围修订 {{ detail.analysis.analysis_revision }} · {{ detail.analysis.status === 'completed' ? '结构化提取已保存' : '分析未完成' }}</p>
         <p v-if="detail.analysis.error" class="error-message">分析说明：{{ detail.analysis.error }}</p>
         <dl class="extracted-fields">
           <div v-for="field in detail.analysis.fields" :key="field.id">
@@ -36,7 +36,7 @@
           <p v-for="(range, index) in detail.analysis.ranges" :key="index" class="muted">{{ sourceLabels[range.source_type] }}{{ range.page_number ? `第 ${range.page_number} 页` : '' }} · 字符[{{ range.location_start }}, {{ range.location_end }}) / {{ range.original_length }}<br><code class="source-id">{{ range.source_text_id }}</code></p>
         </details>
       </template>
-      <p v-else class="muted">当前范围尚无结构化分析。下方已保存原文不等于模型已完成提取。</p>
+      <p v-else class="muted">当前范围尚无结构化分析。</p>
     </section>
 
     <section v-if="citation" class="citation-focus">
@@ -45,9 +45,8 @@
       <blockquote>{{ citation.quote }}</blockquote>
       <code class="source-id">来源快照 {{ citation.source_text_id }}</code>
       <a v-if="sourceLink(citation.source_url)" :href="sourceLink(citation.source_url)" target="_blank" rel="noopener noreferrer">打开引用来源 ↗</a>
-      <p v-if="!citedSource" class="error-message" role="alert">本次详情未返回这条引用的来源快照；不能核对原文。</p>
-      <p v-else-if="!citationMatches" class="error-message" role="alert">引用范围或摘录与已保存快照不一致，需人工核查；未将不匹配的内容标为已验证。</p>
-      <p v-else class="muted">下方高亮来自已保存快照。定位一致不代表原文一定支持回答中的主张。</p>
+      <p v-if="!citedSource" class="error-message" role="alert">未找到这条引用的来源快照。</p>
+      <p v-else-if="!citationMatches" class="error-message" role="alert">引用范围或摘录与已保存快照不一致。</p>
     </section>
 
     <section class="reading-summary">
@@ -57,7 +56,6 @@
         <div><dt>摘要</dt><dd>{{ countReadable('abstract') ? '已保存' : '未读取 / 缺失' }}</dd></div>
         <div><dt>全文</dt><dd>{{ countReadable('fulltext') }} 个可读页快照</dd></div>
       </dl>
-      <p class="muted">仅代表保存的来源与页，不表示阅读全文。下载失败、扫描页、截断与解析状态按原记录展示；不提供 OCR。</p>
     </section>
 
     <section v-if="detail.sources.length" class="saved-sources">
@@ -80,7 +78,7 @@
         <code class="source-id">{{ selectedSource.id }}</code>
       </template>
     </section>
-    <p v-else class="muted">本次运行未保存来源文本，不能根据外部链接推断已经读取。</p>
+    <p v-else class="muted">本次运行未保存来源文本。</p>
 
     <details v-if="detail.evidence.length" class="evidence-records">
       <summary>已保存证据片段 · {{ detail.evidence.length }}</summary>

@@ -1,6 +1,7 @@
 """可恢复的有界研究流程：筛选、提取、比较、缺口迭代和证据报告。"""
 import asyncio
 import json
+import re
 import time
 from typing import Dict, List, Optional
 from uuid import uuid4
@@ -45,6 +46,13 @@ class LimitReached(Exception):
     pass
 
 
+# 暂时性服务错误有限重试，每次重试都计入调用次数；格式类错误按单篇论文记失败。
+TRANSIENT_LLM_ERRORS = {"rate_limited", "timeout", "network_error", "server_error"}
+PAPER_LEVEL_LLM_ERRORS = {"invalid_json", "incomplete", "refusal", "no_text"}
+STOPWORDS = {"a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "into", "is", "of", "on", "or",
+             "the", "to", "with", "without", "not", "via", "using", "based", "how", "what", "which"}
+
+
 class WorkflowEngine:
     def __init__(self, db: Database, arxiv_adapter=None, llm_adapter=None,
                  pdf_adapter=None, max_pdf_fulltext_per_run=3):
@@ -56,6 +64,7 @@ class WorkflowEngine:
         self._serial = None
         self._clock = None
         self._base_seconds = 0.0
+        self.retry_delays = (2.0, 5.0)
 
     def _event(self, run, category, message):
         self.db.save_event(Event(id=uuid4().hex, run_id=run.id, stage=run.stage,
@@ -86,17 +95,23 @@ class WorkflowEngine:
         self._save(run)
 
     async def _call(self, run, operation, reserve=True):
-        if reserve:
-            await self._reserve(run)
-        else:
-            self._checkpoint(run)
-        remaining = run.max_seconds - run.total_execution_seconds
-        if remaining <= 0:
-            raise LimitReached("达到实际执行时间限制")
-        try:
-            return await asyncio.wait_for(operation(), timeout=remaining)
-        except asyncio.TimeoutError as exc:
-            raise LimitReached("达到实际执行时间限制或外部请求超时") from exc
+        for delay in (*self.retry_delays, None):
+            if reserve:
+                await self._reserve(run)
+            else:
+                self._checkpoint(run)
+            remaining = run.max_seconds - run.total_execution_seconds
+            if remaining <= 0:
+                raise LimitReached("达到实际执行时间限制")
+            try:
+                return await asyncio.wait_for(operation(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise LimitReached("达到实际执行时间限制或外部请求超时") from exc
+            except LLMError as exc:
+                if delay is None or exc.code not in TRANSIENT_LLM_ERRORS:
+                    raise
+                self._event(run, "retry", f"模型服务暂时不可用（{exc.code}），{delay:g} 秒后重试")
+                await asyncio.sleep(delay)
 
     async def execute_run(self, run_id: str) -> Run:
         if self._serial is None:
@@ -112,6 +127,13 @@ class WorkflowEngine:
             if run.status != RunStatus.QUEUED:
                 # 所有终态、paused、needs_input均不能被隐式重启。
                 return run
+            if self.llm is None and run.model_calls:
+                # 由模型驱动的研究不能在模型停用后以无模型方式接着跑。
+                run = self.db.transition(run.id, [RunStatus.QUEUED], RunStatus.NEEDS_INPUT)
+                run.stop_reason = "当前没有可用模型；配置模型后可继续这次研究"
+                self.db.update_run(run)
+                self._event(run, "needs_input", run.stop_reason)
+                return run
             run = self.db.transition(run.id, [RunStatus.QUEUED], RunStatus.RUNNING)
             self._clock = time.monotonic()
             self._base_seconds = run.total_execution_seconds
@@ -119,7 +141,8 @@ class WorkflowEngine:
             self._save(run)
             try:
                 if run.initial_input is None:
-                    self._finish(run, "历史运行缺少完整初始快照，请新建运行")
+                    run.status, run.ended_at = RunStatus.FAILED, utc_now()
+                    run.stop_reason = "历史运行缺少完整初始快照，请新建运行"
                     return run
                 pending = [m for m in self.db.list_run_messages(run.id) if m.status == "pending"]
                 if pending:
@@ -162,7 +185,7 @@ class WorkflowEngine:
                     message += "；" + str(exc)
                 self._event(run, "service_error", message)
                 try:
-                    self._finish(run, message)
+                    self._finish(run, message, failed=True)
                 except Halt:
                     pass
             except asyncio.CancelledError:
@@ -223,10 +246,13 @@ class WorkflowEngine:
             if self.db.list_queries(run.id):
                 self._finish(run, "没有新的检索计划；未配置模型，不重复原查询")
                 raise Halt()
-            # 显式的无模型资料检索模式，不是模型失败后的静默回退。
-            phrase = scope.topic.replace('"', ' ')
-            plan = QueryPlan(queries=[f'all:"{phrase}"'], subproblems=[scope.topic], query_targets={f'all:"{phrase}"': [scope.topic]})
-            self._event(run, "mode", "无模型资料检索模式；未进行语义字段提取或充分性判断")
+            # 显式的无模型模式：问题中的关键词逐个作为检索条件，不做整句精确匹配。
+            terms = [t for t in re.findall(r"[^\W_]+", scope.topic) if t.casefold() not in STOPWORDS]
+            if not terms:
+                raise PlanError("问题中没有可用于检索的关键词")
+            query = " AND ".join(f"all:{t}" for t in list(dict.fromkeys(terms))[:8])
+            plan = QueryPlan(queries=[query], subproblems=[scope.topic[:200]], query_targets={query: [scope.topic[:200]]})
+            self._event(run, "mode", "无模型模式：按问题关键词检索 arXiv，不做结构化分析")
         else:
             abstract_limit = min(800, 12000 // max(1, len(history)))
             request = {
@@ -263,7 +289,6 @@ class WorkflowEngine:
         run.scope_history[run.analysis_revision] = run.current_input.model_copy(deep=True)
         run.queries, run.subproblems, run.query_index = queries, plan.subproblems, 0
         run.query_targets = {q: plan.query_targets[q] for q in queries}
-        run.papers_before_round = len(plan.keep_paper_ids or []) if pending else len(self.db.get_papers_by_run(run.id, selected_only=True))
         run.stage = RunStage.SEARCHING if queries else RunStage.SCREENING if pending else RunStage.SYNTHESIZING
         if not queries:
             run.stop_reason = "没有不同于历史的新查询；按当前范围整理已有资料"
@@ -304,7 +329,7 @@ class WorkflowEngine:
             self.db.save_query(entry)
             run.query_index += 1
             self._save(run)
-            self._event(run, "search", f"检索返回{len(results)}条，按年份范围保留{len(filtered)}条（相关性未语义复核）")
+            self._event(run, "search", f"检索返回{len(results)}条，按年份范围保留{len(filtered)}条")
             self._checkpoint(run)
         run.stage = RunStage.SCREENING
         run.pdf_index = 0
@@ -342,7 +367,7 @@ class WorkflowEngine:
             self._checkpoint(run)
         elif batch:
             self.db.save_selections(run.id, [PaperSelection(paper_id=p.id, analysis_revision=run.analysis_revision,
-                relevant=True, reason="无模型模式，未语义复核相关性", reviewed=False) for p in batch])
+                relevant=True, reason="无模型模式，未判断相关性", reviewed=False) for p in batch])
         run.stage, run.pdf_index = RunStage.EXTRACTING, 0
         self._save(run)
 
@@ -402,13 +427,18 @@ class WorkflowEngine:
                 except (LLMError, ValidationError, AnalysisError, LimitReached, asyncio.CancelledError) as exc:
                     if run.total_calls == calls_before:
                         raise
+                    code = getattr(exc, "code", type(exc).__name__)
                     failed = PaperAnalysis(id=uuid4().hex, run_id=run.id, paper_id=paper.id,
                         analysis_revision=run.analysis_revision, round_number=run.current_round, status="failed",
                         focus_dimensions=run.current_input.focus_dimensions, ranges=(previous.ranges if previous else []) + read_ranges(inputs),
                         fields=previous.fields if previous else [], experiments=previous.experiments if previous else [],
-                        error=getattr(exc, "code", type(exc).__name__))
+                        error=code)
                     self.db.save_analysis(failed)
-                    raise
+                    if isinstance(exc, (LimitReached, asyncio.CancelledError)) or (isinstance(exc, LLMError) and exc.code not in PAPER_LEVEL_LLM_ERRORS):
+                        raise
+                    detail = exc.diagnostic if isinstance(exc, LLMError) else str(exc) if isinstance(exc, AnalysisError) else None
+                    self._event(run, "analysis_failed", f"{paper.title[:120]}：结构化提取失败（{code}）" + (f"；{detail}" if detail else ""))
+                    evidence = []
             elif previous and previous.analysis_revision != run.analysis_revision:
                 result = previous.model_copy(update={"id":uuid4().hex, "analysis_revision":run.analysis_revision,
                     "round_number":run.current_round, "reused_from":previous.id, "created_at":utc_now()})
@@ -444,7 +474,7 @@ class WorkflowEngine:
         run.last_progress = progress
         reason = None
         if assessment.sufficient:
-            reason = "满足当前范围的操作性覆盖条件；语义质量仍需人工复核"
+            reason = "满足当前范围的操作性覆盖条件"
         elif self.llm is None:
             reason = "无模型资料检索已结束；未进行结构化分析"
         elif not run.queries and not self._has_unread(run):
@@ -464,7 +494,7 @@ class WorkflowEngine:
             run.analysis_index = 0
             run.stage = RunStage.ANALYZING if self._has_unread(run) else RunStage.PLANNING
         self.db.save_assessment(assessment)
-        self._event(run, "assessment", "；".join(run.gaps) or "当前操作性条件已满足，尚未证明语义正确性")
+        self._event(run, "assessment", "；".join(run.gaps) or "已满足当前范围的覆盖条件")
         self._save(run)
 
     async def _synthesize(self, run):
@@ -501,29 +531,38 @@ class WorkflowEngine:
             request = {"operation":"synthesize", "scope":run.current_input.model_dump(), "analyses":fields,
                 "evidence":[e.model_dump() for e in evidence], "comparisons":[c.model_dump() for c in included],
                 "context_truncated":run.synthesis_truncated, "gaps":run.gaps, "schema":SynthesisOutput.model_json_schema()}
-            response = await self._call(run, lambda: self._generate_json(run, request, "根据给定事实和证据归纳背景、研究分类和综合结论，每条主张关联给定证据ID。保留矛盾和不可比条件，不得引入未提供事实或把模型判断写成已验证正确率。"))
-            sections = synthesize_result(response.parsed_json, supplied)
-            run.pending_sections = [s.model_dump() for s in sections]
+            try:
+                response = await self._call(run, lambda: self._generate_json(run, request, "根据给定事实和证据归纳背景、研究分类和综合结论，每条主张关联给定证据ID。保留矛盾和不可比条件，不得引入未提供事实或把模型判断写成已验证正确率。"))
+                sections = synthesize_result(response.parsed_json, supplied)
+                run.pending_sections = [s.model_dump() for s in sections]
+            except (LLMError, ValidationError, AnalysisError) as exc:
+                if isinstance(exc, LLMError) and exc.code not in PAPER_LEVEL_LLM_ERRORS:
+                    raise
+                # 综合失败时保留已完成的逐篇分析，报告缺口中记录未完成综合。
+                self._event(run, "synthesis_failed", f"综合失败（{getattr(exc, 'code', type(exc).__name__)}）")
         run.stage = RunStage.REPORTING
         self._save(run)
         self._checkpoint(run)
 
-    def _finish(self, run, reason):
+    def _finish(self, run, reason, failed=False):
+        """无结果或达到上限仍生成阶段性报告；只有服务失败且没有可读资料时记为失败。"""
         self._checkpoint(run)
         papers = self.db.get_papers_by_run(run.id, selected_only=True)
         readable = [p for p in papers if any(s.status == "ok" and s.content and s.source_type != SourceType.METADATA for s in self.db.get_source_texts(p.id, run.id))]
         assessment = self._assessment(run)
         run.stop_reason = reason
-        run.gaps = list(dict.fromkeys([*assessment.gaps, "引用定位已校验，原文是否支持主张仍需人工语义复核"]))
+        run.gaps = list(assessment.gaps)
+        if not papers:
+            run.gaps.insert(0, "候选论文均未纳入" if self.db.get_papers_by_run(run.id) else "检索没有找到符合范围的论文")
         if run.synthesis_truncated:
-            run.gaps.append("综合输入因长度上限截断；报告仍保留完整的已存字段与比较，综合文字不代表审阅全部材料")
+            run.gaps.append("综合输入因长度上限截断，综合文字未覆盖全部材料；报告保留完整的已存字段与比较")
         if not run.pending_sections:
             run.gaps.append("未完成背景、分类与结论的模型综合，保留阶段性资料")
         for paper in readable:
             if not any(s.source_type == SourceType.FULLTEXT and s.status == "ok" for s in self.db.get_source_texts(paper.id, run.id)):
                 run.gaps.append(f"{paper.id}：未读取到可用全文，当前最多基于摘要")
         complete = run.sufficient and assessment.sufficient and bool(run.pending_sections)
-        report = self._report(run, papers, assessment, complete) if readable else None
+        report = self._report(run, papers, assessment, complete) if readable or not failed else None
         # 完成状态与报告在同一事务中发布，不能先出现“完成”却没有报告。
         with self.db._get_connection():
             self._checkpoint(run)
@@ -539,17 +578,19 @@ class WorkflowEngine:
         selected = {p.id for p in papers}
         analyses = [a for a in self.db.list_analyses(run.id, run.analysis_revision) if a.paper_id in selected]
         selections = self.db.list_selections(run.id, run.analysis_revision)
+        screened = {s.paper_id for s in selections}
+        excluded = [p for p in self.db.get_papers_by_run(run.id) if p.id not in selected and p.id in screened]
         references = {ref for a in analyses for field in a.fields for ref in field.evidence_ids}
         references.update(ref for a in analyses for experiment in a.experiments for ref in experiment.evidence_ids)
         references.update(ref for s in selections for ref in s.evidence_ids)
-        sources = [s for p in papers for s in self.db.get_source_texts(p.id, run.id)]
+        sources = [s for p in papers + excluded for s in self.db.get_source_texts(p.id, run.id)]
         source_by_id = {s.id:s for s in sources}
         all_evidence = [e for p in self.db.get_papers_by_run(run.id) for e in self.db.get_evidence(p.id,run.id)]
         evidence = [e for e in all_evidence if e.id in references or (e.source_text_id in source_by_id
             and source_by_id[e.source_text_id].source_type == SourceType.ABSTRACT and e.location_start == 0
             and e.quote == source_by_id[e.source_text_id].content[:1000])]
         doc = ReportDocument(analysis_revision=run.analysis_revision, scope=run.current_input,
-            papers=papers, queries=self.db.list_queries(run.id), selections=selections, analyses=analyses,
+            papers=papers, excluded_papers=excluded, queries=self.db.list_queries(run.id), selections=selections, analyses=analyses,
             assessment=assessment, sections=[ReportSection.model_validate(s) for s in run.pending_sections],
             evidence=evidence, sources=[ReportSource(source_text_id=s.id, paper_id=s.paper_id, source_type=s.source_type, page_number=s.page_number,
                 status=s.status, source_url=s.source_url, location_start=0, location_end=len(s.content), original_length=len(s.content)) for s in sources],

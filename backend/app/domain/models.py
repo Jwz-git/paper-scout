@@ -50,8 +50,8 @@ class SourceType(str, Enum):
 class TaskInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     topic: str = Field(min_length=1, max_length=2000)
-    start_year: Optional[int] = Field(default=None, ge=1800, le=utc_now().year + 1, strict=True)
-    end_year: Optional[int] = Field(default=None, ge=1800, le=utc_now().year + 1, strict=True)
+    start_year: Optional[int] = Field(default=None, ge=1800, strict=True)
+    end_year: Optional[int] = Field(default=None, ge=1800, strict=True)
     focus_dimensions: List[str] = Field(default_factory=list, max_length=12)
     output_requirements: Optional[str] = Field(default=None, max_length=4000)
 
@@ -65,6 +65,10 @@ class TaskInput(BaseModel):
 
     @model_validator(mode="after")
     def valid_years(self):
+        # 上限按校验时的年份计算，服务跨年运行后仍正确。
+        latest = utc_now().year + 1
+        if any(year is not None and year > latest for year in (self.start_year, self.end_year)):
+            raise ValueError(f"年份不能晚于{latest}")
         if self.start_year is not None and self.end_year is not None and self.start_year > self.end_year:
             raise ValueError("起始年份不能大于截止年份")
         return self
@@ -117,7 +121,6 @@ class Run(BaseModel):
     synthesis_truncated: bool = False
     pdf_attempted: List[str] = Field(default_factory=list)
     no_new_rounds: int = 0
-    papers_before_round: int = 0
     gaps: List[str] = Field(default_factory=list)
     model_calls: int = 0
     token_usage: Dict[str, Optional[int]] = Field(default_factory=lambda: {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None})
@@ -233,6 +236,7 @@ class PaperSelection(BaseModel):
     subproblems: List[str] = Field(default_factory=list)
     evidence_ids: List[str] = Field(default_factory=list)
     reviewed: bool = True
+    error: Optional[str] = None
 
 
 class Experiment(BaseModel):
@@ -313,6 +317,7 @@ class ReportDocument(BaseModel):
     analysis_revision: int
     scope: TaskInput
     papers: List[Paper]
+    excluded_papers: List[Paper] = Field(default_factory=list)
     queries: List[SearchQuery]
     selections: List[PaperSelection]
     analyses: List[PaperAnalysis]
@@ -323,7 +328,6 @@ class ReportDocument(BaseModel):
     total_calls: int
     model_calls: int
     token_usage: Dict[str, Optional[int]]
-    semantic_review: str = "未进行人工语义复核；定位校验不证明主张成立"
     execution_seconds: float = 0.0
     limits: Dict[str, float] = Field(default_factory=dict)
 

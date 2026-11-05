@@ -172,6 +172,7 @@ details[open] > summary > [data-icon='chevronDown'] { transform: rotate(180deg);
 .history-menu button:disabled { opacity: .5; }
 .history-menu button .ui-icon { width: 14px; height: 14px; }
 .history-empty { padding: 20px 10px; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.history-more { margin: 6px 10px 12px; font-size: 12px; }
 .sidebar-actions { flex: none; padding-top: 12px; }
 .sidebar-actions .sidebar-settings { min-height: 36px; margin: 0; padding: 8px 10px; font-size: 13px; }
 .sidebar-actions .sidebar-settings > .ui-icon:last-child { display: none; }
@@ -254,10 +255,21 @@ details[open] > summary > [data-icon='chevronDown'] { transform: rotate(180deg);
 .legacy-run > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .legacy-run strong { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; }
 .legacy-run time { color: var(--muted); font-size: 10px; }
+/* 执行活动内联在所属回合的回答之前，默认折叠为一行，不占用输入区。 */
+.turn-activity { margin: 0 0 14px; }
+/* 展开细节时操作区仍与折叠摘要那一行对齐，而不是垂直居中于整个展开面板。 */
+.activity-head { display: flex; align-items: flex-start; gap: 12px; min-height: 30px; }
+.activity-head > .process-records > summary { min-height: 28px; }
+.activity-head > .activity-actions { min-height: 28px; }
+.turn-activity .process-records { min-width: 0; flex: 1; margin: 0; }
 .process-records { margin: 6px 0 0; }
 .process-records > summary { display: flex; align-items: center; gap: 16px; min-height: 36px; color: var(--muted); font-size: 12px; }
 .process-label, .process-summary { display: inline-flex; align-items: center; gap: 5px; }
-.process-label { flex: none; }
+.process-label { min-width: 0; flex: 0 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.activity-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.activity-actions > button { min-height: 28px; padding: 5px 8px; border: 0; border-radius: 5px; background: none; color: var(--muted); font-size: 11px; }
+.activity-actions > button:hover:not(:disabled) { background: var(--raised); color: var(--text); }
+.activity-actions > button:disabled { opacity: .5; }
 .process-label .ui-icon { width: 13px; height: 13px; }
 .process-records[open] .process-label .ui-icon { transform: rotate(90deg); }
 .process-summary { min-width: 0; overflow: hidden; color: var(--faint); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
@@ -273,19 +285,12 @@ details[open] > summary > [data-icon='chevronDown'] { transform: rotate(180deg);
 .jump-bottom { position: absolute; left: 50%; bottom: calc(100% + 12px); z-index: 2; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 20px; background: var(--paper); box-shadow: var(--overlay-shadow); color: var(--muted); font-size: 11px; transform: translateX(-50%); }
 .jump-bottom:hover { background: var(--raised); }
 .jump-bottom .ui-icon { width: 13px; height: 13px; }
-.execution-strip { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 36px; color: var(--muted); font-size: 11px; }
-.execution-description { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; overflow: hidden; }
-.execution-description strong { flex: none; font-weight: 400; }
-.execution-description > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.execution-description i { width: 5px; height: 5px; flex: none; border-radius: 50%; background: var(--control); }
-.execution-description i.running { background: var(--muted); }
-.execution-actions { display: flex; align-items: center; gap: 4px; flex: none; }
-.execution-actions > button, .usage-details > summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 5px 7px; border: 0; border-radius: 5px; background: none; color: var(--muted); font-size: 11px; }
-.execution-actions > button:hover:not(:disabled), .usage-details > summary:hover { background: var(--raised); color: var(--text); }
-.execution-actions > button:disabled { opacity: .5; }
+/* 用量的展开面板锚定在回合内的活动行，不再占用输入区上方的常驻状态条。 */
 .usage-details { position: relative; }
+.usage-details > summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 5px; background: none; color: var(--muted); font-size: 11px; }
+.usage-details > summary:hover { background: var(--raised); color: var(--text); }
 .usage-details > summary .ui-icon { width: 10px; height: 10px; }
-.usage-details > div { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 6; width: min(300px, calc(100vw - 40px)); padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); box-shadow: var(--overlay-shadow); color: var(--text); font-size: 12px; line-height: 1.8; }
+.usage-details > div { position: absolute; right: 0; top: calc(100% + 6px); z-index: 6; width: min(300px, calc(100vw - 40px)); padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); box-shadow: var(--overlay-shadow); color: var(--text); font-size: 12px; line-height: 1.8; }
 .usage-details h3 { margin-bottom: 12px; font-size: 13px; font-weight: 500; }
 .usage-details p { margin-bottom: 8px; }
 .usage-details p:last-child { margin-bottom: 0; }
@@ -297,11 +302,16 @@ details[open] > summary > [data-icon='chevronDown'] { transform: rotate(180deg);
 .pending-notice p { margin: 4px 0 0; line-height: 1.8; }
 .pending-notice blockquote { max-height: 64px; margin: 8px 0 0; padding-left: 10px; overflow-y: auto; border-left: 2px solid var(--control); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pending-notice > button { flex: none; }
-.workspace-notice { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); color: var(--text); font-size: 12px; line-height: 1.8; }
-.workspace-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.workspace-notice.notice-error { border-color: var(--negative-border); background: var(--negative-soft); color: var(--negative-ink); }
-.workspace-notice > .icon-button { width: 25px; height: 25px; }
-.workspace-notice .ui-icon { width: 14px; height: 14px; }
+.toast { position: fixed; top: 16px; left: 50%; z-index: 110; display: flex; align-items: center; gap: 8px; width: max-content; max-width: min(440px, calc(100vw - 32px)); padding: 6px 6px 6px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); box-shadow: var(--overlay-shadow); color: var(--text); font-size: 13px; line-height: 1.6; transform: translateX(-50%); }
+.toast > span { min-width: 0; overflow-wrap: anywhere; }
+.toast > .ui-icon { flex: none; width: 15px; height: 15px; color: var(--muted); }
+.toast.toast-error { border-color: var(--negative-border); background: var(--negative-soft); color: var(--negative-ink); }
+.toast.toast-error > .ui-icon { color: currentColor; }
+.toast > .text-button { flex: none; font-weight: 600; }
+.toast > .icon-button { flex: none; width: 26px; height: 26px; }
+.toast > .icon-button .ui-icon { width: 14px; height: 14px; }
+.toast-enter-active, .toast-leave-active { transition: opacity .18s ease, transform .18s ease; }
+.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, -8px); }
 .composer { position: relative; padding: 5px; border: 1px solid var(--control); border-radius: 20px; background: var(--paper); box-shadow: 0 2px 6px var(--shadow-color); }
 .composer:focus-within { border-color: var(--accent-border); }
 .composer textarea { display: block; width: 100%; min-height: 68px; max-height: 192px; padding: 12px 14px 6px; resize: none; border: 0; outline: none; border-radius: 15px; background: none; color: var(--text); font-size: var(--fs-reading); line-height: 1.8; scrollbar-width: thin; }
@@ -337,9 +347,7 @@ details[open] > summary > [data-icon='chevronDown'] { transform: rotate(180deg);
 .send-button:hover:not(:disabled) { background: var(--primary-hover); }
 .send-button:disabled { background: var(--active); color: var(--faint); }
 .stop-button .ui-icon { width: 18px; height: 18px; fill: currentColor; stroke-width: 0; }
-.composer-footnote { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 28px; padding: 6px 2px 0; color: var(--faint); font-size: 10px; }
-.composer-footnote > span:first-child { display: flex; align-items: center; gap: 5px; }
-.composer-footnote .ui-icon { width: 11px; height: 11px; }
+.composer-footnote { display: flex; align-items: center; justify-content: flex-end; gap: 8px; height: 28px; padding: 6px 2px 0; color: var(--faint); font-size: 10px; }
 .model-status { flex: none; }
 
 .artifact-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--border); background: var(--surface); }

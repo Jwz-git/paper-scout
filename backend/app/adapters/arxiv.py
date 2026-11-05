@@ -9,6 +9,7 @@ import httpx
 from backend.app.domain.models import Paper
 from urllib.parse import urlparse
 
+TRANSIENT_CODES = {"rate_limited", "server_error", "timeout", "network_error"}
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 
 
@@ -135,11 +136,15 @@ class ArXivAdapter:
         timeout_seconds: float = 20.0,
         *,
         client: Optional[httpx.AsyncClient] = None,
+        max_attempts: int = 3,
+        retry_delay_seconds: float = 5.0,
     ):
         self.user_agent = user_agent
         self.rate_limit_seconds = rate_limit_seconds
         self.timeout_seconds = timeout_seconds
         self._client = client
+        self.max_attempts = max_attempts
+        self.retry_delay_seconds = retry_delay_seconds
         self._last_request_time: float = 0.0
 
     async def _enforce_rate_limit(self) -> None:
@@ -161,7 +166,16 @@ class ArXivAdapter:
         *,
         on_request: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> List[Paper]:
-        """向 arXiv API 发起查询并返回 Paper 对象列表"""
+        """向 arXiv API 发起查询；限流、超时等暂时性错误有限重试，每次请求都经过 on_request 计数。"""
+        for attempt in range(self.max_attempts):
+            try:
+                return await self._search_once(query, start, max_results, sort_by, sort_order, on_request)
+            except ArXivError as exc:
+                if exc.code not in TRANSIENT_CODES or attempt == self.max_attempts - 1:
+                    raise
+                await asyncio.sleep(self.retry_delay_seconds * (attempt + 1))
+
+    async def _search_once(self, query, start, max_results, sort_by, sort_order, on_request) -> List[Paper]:
         await self._enforce_rate_limit()
 
         params = {
@@ -186,6 +200,8 @@ class ArXivAdapter:
                     resp = await client.get(self.BASE_URL, params=params, headers=headers)
             if resp.status_code == 429:
                 raise ArXivError("rate_limited", "arXiv 速率限制已触发 (HTTP 429)，请稍后重试。")
+            if resp.status_code >= 500:
+                raise ArXivError("server_error", f"arXiv 服务暂时不可用，HTTP {resp.status_code}。")
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise ArXivError("http_error", f"arXiv 请求失败，HTTP {exc.response.status_code}。") from exc

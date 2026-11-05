@@ -1,18 +1,16 @@
 """本机模型配置：入口校验、私有文件保存与空闲时应用。"""
-import asyncio
 import json
-import time
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional
 from uuid import uuid4
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
 
-from backend.app.adapters.llm import create_llm_adapter, LLMMessage, LLMError, LLMUsage
-from backend.app.domain.conversation import ConversationUsage
+from backend.app.adapters.llm import create_llm_adapter
+from backend.app.dialogue import TURN_SECONDS
 from backend.app.domain.models import Run
 from backend.app.storage.database import StateConflict
 
@@ -85,47 +83,11 @@ class CompleteConnection(ModelConnection):
         return self
 
 
-LIMIT_RANGES = {"max_rounds": (1, 10), "max_calls": (1, 100), "max_seconds": (60, 3600)}
-
-
-class ResearchLimits(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    max_rounds: int = Field(default=3, ge=LIMIT_RANGES["max_rounds"][0], le=LIMIT_RANGES["max_rounds"][1], strict=True)
-    max_calls: int = Field(default=20, ge=LIMIT_RANGES["max_calls"][0], le=LIMIT_RANGES["max_calls"][1], strict=True)
-    max_seconds: int = Field(default=900, ge=LIMIT_RANGES["max_seconds"][0], le=LIMIT_RANGES["max_seconds"][1], strict=True)
-
-
-class ConversationLimits(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    max_calls: int = Field(default=40, ge=LIMIT_RANGES["max_calls"][0], le=LIMIT_RANGES["max_calls"][1], strict=True)
-    max_seconds: int = Field(default=900, ge=LIMIT_RANGES["max_seconds"][0], le=LIMIT_RANGES["max_seconds"][1], strict=True)
-
-
-class ExecutionLimits(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    research: ResearchLimits = Field(default_factory=ResearchLimits)
-    conversation: ConversationLimits = Field(default_factory=ConversationLimits)
-
-
-class ProbeRequest(CompleteConnection):
-    provider_id: Optional[str] = None
-
-
-class ProbeResult(BaseModel):
-    success: bool
-    category: str
-    message: str
-    duration_seconds: float
-    calls: int = 1
-    token_usage: LLMUsage = Field(default_factory=LLMUsage)
-
-
 class LegacyStoredSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
     active_profile_id: Optional[str]
     profiles: List[StoredProfile]
-    limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
 
     @model_validator(mode="after")
     def valid_selection(self):
@@ -177,7 +139,6 @@ class ProviderSettings(BaseModel):
     active_provider_id: Optional[str]
     active_model: Optional[str]
     providers: List[StoredProvider]
-    limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
 
     @model_validator(mode="after")
     def valid_selection(self):
@@ -222,12 +183,9 @@ class ModelSettingsView(BaseModel):
     active_provider_id: Optional[str]
     active_model: Optional[str]
     providers: List[ProviderView]
-    limits: ExecutionLimits
-    limit_defaults: ExecutionLimits
-    limit_ranges: Dict[str, Dict[str, int]]
+    limits: Dict[str, Dict[str, int]]
     app_name: str
     app_version: str
-    diagnostic_calls: int
 
 
 class ProviderSaveResult(BaseModel):
@@ -235,16 +193,24 @@ class ProviderSaveResult(BaseModel):
     settings: ModelSettingsView
 
 
+# 实际生效的执行上限：研究取运行模型的默认值，对话每轮固定一次模型调用。
+EFFECTIVE_LIMITS = {
+    "research": {name: int(Run.model_fields[name].default) for name in ("max_rounds", "max_calls", "max_seconds")},
+    "conversation": {"calls_per_turn": 1, "seconds_per_turn": int(TURN_SECONDS)},
+}
+
+
 class ModelSettingsService:
     def __init__(self, config):
         self.path = config.data_dir / "model-settings.json"
         self.source = "environment"
-        self.testing = False
-        self.diagnostic_calls = 0
         self.app_name, self.app_version = config.app_name, config.app_version
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    # 旧版文件保存过从未生效的 limits，读取时丢弃。
+                    data.pop("limits", None)
                 if isinstance(data, dict) and "providers" in data:
                     self.state = ProviderSettings.model_validate(data)
                 elif isinstance(data, dict) and "profiles" in data:
@@ -294,7 +260,7 @@ class ModelSettingsService:
             profile_providers[profile.id] = provider.id
         active = next((p for p in legacy.profiles if p.id == legacy.active_profile_id), None)
         return ProviderSettings(enabled=legacy.enabled, active_provider_id=profile_providers.get(legacy.active_profile_id),
-                                active_model=active.model if active and active.model else None, providers=providers, limits=legacy.limits)
+                                active_model=active.model if active and active.model else None, providers=providers)
 
     def find(self, provider_id):
         provider = next((p for p in self.state.providers if p.id == provider_id), None)
@@ -323,7 +289,7 @@ class ModelSettingsService:
             ).fetchone())
 
     def require_idle(self, db, worker):
-        if self.testing or self.busy(db, worker):
+        if self.busy(db, worker):
             raise StateConflict("仍有排队或执行中的工作，请暂停研究并等待当前对话结束后再切换当前模型")
 
     @staticmethod
@@ -338,13 +304,11 @@ class ModelSettingsService:
         cfg = self.current
         return {"enabled": cfg.enabled, "protocol": cfg.protocol, "base_url": cfg.base_url, "model": cfg.model,
                 "api_key_set": bool(cfg.api_key and cfg.api_key.get_secret_value()), "source": self.source,
-                "busy": self.testing or self.busy(db, worker), "active_provider_id": self.state.active_provider_id,
+                "busy": self.busy(db, worker), "active_provider_id": self.state.active_provider_id,
                 "active_model": self.state.active_model,
                 "providers": [{"id": p.id, "name": p.name, "protocol": p.protocol, "base_url": p.base_url,
                                "models": p.models, "api_key_set": bool(p.api_key and p.api_key.get_secret_value())} for p in self.state.providers],
-                "limits": self.state.limits.model_dump(), "limit_defaults": ExecutionLimits().model_dump(),
-                "limit_ranges": {name: {"min": bounds[0], "max": bounds[1]} for name, bounds in LIMIT_RANGES.items()},
-                "app_name": self.app_name, "app_version": self.app_version, "diagnostic_calls": self.diagnostic_calls}
+                "limits": EFFECTIVE_LIMITS, "app_name": self.app_name, "app_version": self.app_version}
 
     def commit(self, state, engine, dialogue, apply):
         provider = next((p for p in state.providers if p.id == state.active_provider_id), None)
@@ -384,7 +348,7 @@ class ModelSettingsService:
         state = ProviderSettings(enabled=False if removed_current else self.state.enabled,
                                  active_provider_id=None if removed_current else self.state.active_provider_id,
                                  active_model=None if removed_current else self.state.active_model,
-                                 providers=providers, limits=self.state.limits)
+                                 providers=providers)
         self.commit(state, engine, dialogue, active)
         return {"provider_id": provider.id, "settings": self.view(db, worker)}
 
@@ -422,50 +386,6 @@ class ModelSettingsService:
         provider = StoredProvider(id=previous.id if previous else "default", name=previous.name if previous else urlsplit(update.base_url).hostname or "默认供应商",
                                   protocol=update.protocol, base_url=update.base_url, models=[m for m in models if m], api_key=key)
         providers = [p for p in self.state.providers if p.id != provider.id] + [provider]
-        state = ProviderSettings(enabled=update.enabled, active_provider_id=provider.id, active_model=update.model or None, providers=providers, limits=self.state.limits)
+        state = ProviderSettings(enabled=update.enabled, active_provider_id=provider.id, active_model=update.model or None, providers=providers)
         self.commit(state, engine, dialogue, True)
         return self.view(db, worker)
-    def save_limits(self, update, db, worker, engine, dialogue):
-        state = self.state.model_copy(update={"limits": update})
-        self.commit(state, engine, dialogue, False)
-        dialogue.run_defaults = update.research.model_dump()
-        dialogue.store.usage_defaults = update.conversation.model_dump()
-        return self.view(db, worker)
-
-    async def probe(self, update, db, worker, activity_lock):
-        self.require_idle(db, worker)
-        previous = self.find(update.provider_id) if update.provider_id is not None else None
-        key = self.resolve_key(update, previous)
-        adapter = create_llm_adapter(update.protocol, update.base_url, update.model, key.get_secret_value(), timeout_seconds=15)
-        self.testing = True
-        started = time.monotonic()
-        try:
-            async with activity_lock:
-                self.diagnostic_calls += 1
-                try:
-                    response = await asyncio.wait_for(adapter.generate([
-                        LLMMessage(role="system", content='这是固定连接诊断。仅返回 JSON 对象 {"ok":true}，不要输出 Markdown 或其他内容。'),
-                        LLMMessage(role="user", content='请返回 JSON：{"ok":true}')
-                    ], response_format="json_object", max_tokens=256), timeout=15)
-                    valid = response.parsed_json is not None and response.parsed_json.get("ok") is True
-                    return ProbeResult(success=valid, category="ok" if valid else "unexpected_json",
-                        message="连接和固定 JSON 返回测试通过。" if valid else "已收到响应，但未通过固定 JSON 格式测试。",
-                        duration_seconds=round(time.monotonic()-started, 2), token_usage=response.usage)
-                except (LLMError, asyncio.TimeoutError) as error:
-                    category = error.code if isinstance(error, LLMError) else "timeout"
-                    messages = {
-                        "authentication_failed": "鉴权失败，请检查密钥及当前服务权限。",
-                        "rate_limited": "服务限流或配额不足，请在服务商处检查。",
-                        "http_error": "服务返回 HTTP 错误，请检查 API 前缀、协议和模型 ID。",
-                        "timeout": "15秒内未完成诊断，请检查服务速度与网络。",
-                        "network_error": "无法连接服务，请检查服务地址和网络。",
-                        "invalid_json": "服务返回了文本，但不是有效 JSON 对象。",
-                        "incomplete": "响应未完成，可能达到诊断的256 Token上限。",
-                        "refusal": "服务拒绝了固定诊断消息。",
-                        "no_text": "服务没有返回可用文本。",
-                    }
-                    return ProbeResult(success=False, category=category,
-                        message=messages.get(category, "模型响应格式不符合所选协议。"),
-                        duration_seconds=round(time.monotonic()-started, 2), token_usage=getattr(error, "usage", None) or LLMUsage())
-        finally:
-            self.testing = False

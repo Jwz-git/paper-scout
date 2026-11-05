@@ -68,15 +68,15 @@
                     <div class="settings-field"><label for="model-protocol">接口类型</label><select id="model-protocol" v-model="form.protocol" class="model-protocol-select"><option v-for="protocol in protocols" :key="protocol.value" :value="protocol.value">{{ protocol.label }}</option></select></div>
                     <div class="settings-field"><label for="model-base-url">服务地址 <span>Base URL</span></label><div class="settings-input-wrap"><input id="model-base-url" v-model="form.base_url" type="url" required maxlength="2000" placeholder="https://your-provider.example/v1" autocomplete="off" spellcheck="false" /></div><p class="field-help">填写服务商提供的 API 根地址，不含具体请求端点。</p></div>
                     <div class="settings-field"><label for="model-api-key">API Key <span v-if="editingProfile?.api_key_set" class="key-saved"><UiIcon name="key" />已保存</span></label><div class="settings-input-wrap"><input id="model-api-key" v-model="form.api_key" :type="showKey ? 'text' : 'password'" :disabled="form.clear_api_key" maxlength="4096" :placeholder="form.clear_api_key ? '保存后清除原密钥' : editingProfile?.api_key_set ? '留空保留原密钥，输入新值可替换' : '服务无需密钥时可留空'" autocomplete="new-password" spellcheck="false" /><button type="button" class="icon-button" :disabled="!form.api_key || form.clear_api_key" :aria-label="showKey ? '隐藏新密钥' : '显示新密钥'" :aria-pressed="showKey" @click="showKey = !showKey"><UiIcon :name="showKey ? 'eyeOff' : 'eye'" /></button></div><div class="key-options"><p class="field-help">密钥仅保存于本机服务端，不会回显。</p><label v-if="editingProfile?.api_key_set" class="clear-key"><input v-model="form.clear_api_key" type="checkbox" @change="form.api_key = ''; showKey = false" />清除原密钥</label></div></div>
-                    <div class="settings-field"><div class="model-selection-label"><label for="model-picker-trigger">模型<span>可多选</span></label><button type="button" class="model-fetch-button" :disabled="catalogLoading || !form.base_url.trim() || (addressChanged && editingProfile?.api_key_set && !form.api_key && !form.clear_api_key)" @click="fetchModels(false)"><UiIcon :name="catalogLoading ? 'clock' : 'refresh'" />{{ catalogLoading ? '获取中…' : '获取模型' }}</button></div><ModelPicker v-model="selectedModels" :options="catalogModels" :disabled="saving" :loading="catalogLoading" :has-more="!!catalogCursor" @more="fetchModels(true)" /><p v-if="catalogError" class="model-catalog-status model-catalog-error" role="alert">{{ catalogError }}</p><p v-else-if="catalogLoaded" class="model-catalog-status" role="status">{{ catalogModels.length ? `已获取 ${catalogModels.length} 个模型${catalogCursor ? '，可加载更多' : ''}。` : '服务未返回模型，可手动添加模型 ID。' }}</p><p class="field-help">获取模型仅请求服务的模型列表；列表中的型号是否支持当前接口，仍以实际调用为准。</p></div>
+                    <div class="settings-field"><div class="model-selection-label"><label for="model-picker-trigger">模型<span>可多选</span></label><button type="button" class="model-fetch-button" :disabled="catalogLoading || !form.base_url.trim() || (addressChanged && editingProfile?.api_key_set && !form.api_key && !form.clear_api_key)" @click="fetchModels(false)"><UiIcon :name="catalogLoading ? 'clock' : 'refresh'" />{{ catalogLoading ? '获取中…' : '获取模型' }}</button></div><ModelPicker v-model="selectedModels" :options="catalogModels" :disabled="saving" :loading="catalogLoading" :has-more="!!catalogCursor" @more="fetchModels(true)" /><p v-if="catalogError" class="model-catalog-status model-catalog-error" role="alert">{{ catalogError }}</p><p v-else-if="catalogLoaded" class="model-catalog-status" role="status">{{ catalogModels.length ? `已获取 ${catalogModels.length} 个模型${catalogCursor ? '，可加载更多' : ''}。` : '服务未返回模型，可手动添加模型 ID。' }}</p></div>
                   </fieldset>
                   <div v-if="addressChanged && editingProfile?.api_key_set" class="settings-notice"><UiIcon name="info" /><p>地址已更改，请重新输入密钥或勾选清除原密钥。</p></div>
                   <p class="model-save-explainer">{{ saveExplainer }}</p>
                   <div class="model-editor-actions"><button type="button" class="settings-secondary" :disabled="saving" @click="requestEditorClose">取消</button><button type="submit" class="settings-save" :disabled="!canSave"><UiIcon :name="saving ? 'refresh' : 'check'" />{{ saving ? '正在保存…' : '保存供应商' }}</button></div>
                 </form>
-                <div v-if="settings.busy" class="settings-notice"><UiIcon name="clock" /><p>Agent 正在处理任务，结束或暂停后可切换模型、修改或删除当前供应商；其他供应商仍可添加和编辑。</p><button type="button" class="text-button" :disabled="saving" @click="refreshBusy">刷新状态</button></div>
+                <div v-if="settings.busy" class="settings-notice"><UiIcon name="clock" /><p>对话或研究进行中，结束或暂停后才能修改或删除当前供应商。</p><button type="button" class="text-button" :disabled="saving" @click="refreshBusy">刷新状态</button></div>
                 <div v-if="saveError" class="settings-error model-operation-error" role="alert"><UiIcon name="info" /><p>{{ saveError }}</p></div>
-                <p v-if="!editorOpen && providers.length" class="settings-privacy"><UiIcon name="shield" />对话内容与相关来源会发送至所选供应商。保存配置不会发起模型调用。</p>
+                <p v-if="!editorOpen && providers.length" class="settings-privacy"><UiIcon name="shield" />对话内容与相关来源会发送至所选供应商。</p>
               </section>
               <ResearchUsage v-else :conversation="conversation" :limits="settings.limits" @close="close" />
             </template>
@@ -86,7 +86,7 @@
         </div>
       </section>
     </div>
-    <ActionDialog v-if="discardOpen && open" title="放弃本次编辑？" description="尚未保存的修改会被丢弃，已保存的模型不受影响。" confirm-label="放弃修改" @close="discardOpen = false" @confirm="finishEditing" />
+    <ActionDialog v-if="discardOpen && open" title="放弃本次编辑？" description="尚未保存的修改将被丢弃。" confirm-label="放弃修改" @close="cancelDiscard" @confirm="finishEditing" />
     <ActionDialog v-if="removeTarget && open" title="删除这个供应商？" :description="`将删除“${removeTarget.name}”的连接信息、密钥和 ${removeTarget.models.length} 个已选模型。历史对话和资料保留。${isActive(removeTarget) ? '删除后需要重新选择供应商和模型。' : ''}`" confirm-label="删除供应商" danger :busy="saving" @close="removeTarget = null" @confirm="removeProvider" />
     <ActionDialog v-if="resetOpen && open" title="恢复默认偏好？" description="主题将恢复跟随系统；发送快捷键、默认消息模式、自动滚动、字号和宽度将恢复默认。已保存的对话、模型配置和密钥不受影响。" confirm-label="恢复默认" @close="resetOpen = false" @confirm="restorePreferences" />
   </Teleport>
@@ -132,7 +132,7 @@ const themeOptions: { value: ThemePreference; label: string; description: string
 const dialog = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const settings = ref<ModelSettings | null>(null);
-const providers = computed(() => (settings.value?.providers || []).sort((a, b) => Number(isActive(b)) - Number(isActive(a))));
+const providers = computed(() => [...(settings.value?.providers || [])].sort((a, b) => Number(isActive(b)) - Number(isActive(a))));
 const isActive = (provider?: AiProvider) => !!settings.value?.enabled && provider?.id === settings.value.active_provider_id;
 const editorOpen = ref(false);
 const editorKind = ref<'add' | 'edit'>('add');
@@ -195,8 +195,15 @@ function closeEditor() {
   Object.assign(form, { name: '', protocol: 'openai_chat', base_url: '', api_key: '', clear_api_key: false });
   showKey.value = false;
 }
-function finishEditing() { closeEditor(); void nextTick(() => addModelButton.value?.focus()); }
-function requestEditorClose() { if (dirty.value) discardOpen.value = true; else finishEditing(); }
+// 关闭设置时若有未保存的编辑，先确认放弃，确认后再关闭面板。
+let closeAfterDiscard = false;
+function finishEditing() {
+  closeEditor();
+  if (closeAfterDiscard) { closeAfterDiscard = false; emit('close'); return; }
+  void nextTick(() => addModelButton.value?.focus());
+}
+function cancelDiscard() { discardOpen.value = false; closeAfterDiscard = false; }
+function requestEditorClose() { closeAfterDiscard = false; if (dirty.value) discardOpen.value = true; else finishEditing(); }
 function openEditor(profile?: AiProvider) {
   editorKind.value = profile ? 'edit' : 'add';
   // 初始环境中的空占位项在首个模型保存时直接补全，不显示成一个假模型。
@@ -256,7 +263,10 @@ async function removeProvider() {
   await perform(() => deleteProvider(id, operationController.signal), '供应商已删除');
   removeTarget.value = null;
 }
-function close() { emit('close'); }
+function close() {
+  if (editorOpen.value && dirty.value && !saving.value) { closeAfterDiscard = true; discardOpen.value = true; return; }
+  emit('close');
+}
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     const picker = dialog.value?.querySelector<HTMLDetailsElement>('details.model-picker[open]');

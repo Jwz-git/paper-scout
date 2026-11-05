@@ -1,20 +1,20 @@
 <template>
   <section class="research-analysis" aria-label="研究分析">
     <div class="analysis-heading"><h3>分析与比较</h3><button type="button" @click="load">刷新分析</button></div>
-    <p v-if="loading" role="status">正在读取分析…</p>
+    <p v-if="loading && !data" role="status">正在读取分析…</p>
     <p v-if="error" class="error-message" role="alert">{{ error }}</p>
     <template v-if="data">
-      <p class="analysis-note">范围修订 {{ data.analysis_revision }}。以下是基于已提供片段的结果，不代表覆盖全部论文或完成语义复核。</p>
+      <p class="analysis-note">范围修订 {{ data.analysis_revision }}</p>
       <section>
         <h4>子问题覆盖</h4>
         <template v-if="data.assessment">
-          <p class="analysis-note">{{ data.assessment.sufficient ? '达到本次操作性门槛' : '仍有证据缺口' }}；规则 {{ data.assessment.rule }}，不是准确率评分。</p>
+          <p class="analysis-note">{{ data.assessment.sufficient ? '达到本次操作性门槛' : '仍有证据缺口' }}；规则 {{ data.assessment.rule }}</p>
           <dl><div v-for="(ids, subproblem) in data.assessment.supporting_papers" :key="subproblem"><dt>{{ subproblem }}</dt><dd>{{ ids.length }} 个有依据的论文组</dd></div></dl>
           <details><summary>约定字段的有证据数量</summary><dl><div v-for="(count, id) in data.assessment.field_counts" :key="id"><dt><button class="paper-link" @click="$emit('paper', id)">{{ title(id) }}</button></dt><dd>{{ count[0] }} / {{ count[1] }}</dd></div></dl></details>
           <ul class="analysis-list"><li v-for="gap in data.assessment.gaps" :key="gap">{{ gap }}</li></ul>
           <details v-if="data.assessment.next_actions.length"><summary>缺口对应的后续动作</summary><ul class="analysis-list"><li v-for="action in data.assessment.next_actions" :key="action">{{ action }}</li></ul></details>
         </template>
-        <p v-else class="analysis-note">尚未完成本轮评估，不能据论文数量判断充分性。</p>
+        <p v-else class="analysis-note">尚未完成本轮评估。</p>
       </section>
       <section>
         <h4>筛选记录</h4>
@@ -27,7 +27,6 @@
       </section>
       <section>
         <h4>实验条件比较</h4>
-        <p class="analysis-note">只比较同指标记录；条件缺失不默认相同，同作版本不作为独立论文重复比较。</p>
         <div v-if="data.assessment?.comparisons.length" class="comparison-scroll" tabindex="0" role="region" aria-label="实验比较表">
           <table><thead><tr><th>论文与指标值</th><th>可比性与依据</th></tr></thead><tbody>
             <tr v-for="(comparison, index) in data.assessment.comparisons" :key="index">
@@ -36,7 +35,7 @@
             </tr>
           </tbody></table>
         </div>
-        <p v-else class="analysis-note">暂无同指标的跨论文实验对；不能生成方法排名。</p>
+        <p v-else class="analysis-note">暂无同指标的跨论文实验对。</p>
         <details v-if="data.assessment?.duplicate_candidates.length"><summary>疑似重复，尚未合并</summary><p v-for="(pair, index) in data.assessment.duplicate_candidates" :key="index">{{ pair.map(title).join(' / ') }}</p></details>
       </section>
     </template>
@@ -65,7 +64,8 @@ async function load() {
   catch (cause) { if (!current.signal.aborted) error.value = cause instanceof Error ? cause.message : '未能读取分析，请重试。'; }
   finally { if (!current.signal.aborted) loading.value = false; }
 }
-watch(() => [props.run.id, props.run.analysis_revision, props.run.total_calls, props.run.status], load, { immediate: true });
+// 分析只在阶段、轮次或状态变化时产生；轮询中的调用计数变化不重新读取。
+watch(() => [props.run.id, props.run.analysis_revision, props.run.stage, props.run.current_round, props.run.status], load, { immediate: true });
 onUnmounted(() => controller?.abort());
 </script>
 

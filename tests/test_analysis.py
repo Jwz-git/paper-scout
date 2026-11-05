@@ -73,7 +73,6 @@ def test_real_state_machine_reaches_completed_only_with_report_and_evidence(stor
     assert run.total_calls == 10 and run.model_calls == 9
     assert len(report.document.analyses) == 6 and len(report.document.sections) == 3
     assert all(f.evidence_ids for a in report.document.analyses for f in a.fields)
-    assert '未进行人工语义复核' in report.content_markdown
     assert len([r for r in model.requests if r.get('operation') == 'extract']) == 6
 
 
@@ -126,17 +125,17 @@ def test_screening_preserves_quote_whitespace_and_global_range(text):
 
 
 @pytest.mark.parametrize('fault, diagnostic', [
-    ('missing_paper', '筛选结果必须覆盖本次每篇候选论文'),
+    ('missing_paper', '模型未返回该论文的筛选结果'),
     ('unknown_subproblem', '筛选结果引用了未知子问题'),
     ('missing_basis', '相关论文必须关联子问题和实际依据'),
     ('foreign_source', '引用不属于本次提供的来源范围'),
     ('wrong_quote', '引用与原文不一致'),
 ])
-def test_screening_failure_keeps_safe_reason_and_unreviewed_candidates(store, fault, diagnostic):
+def test_invalid_screening_only_excludes_that_paper(store, fault, diagnostic):
     def hook(request, response):
         if request.get('operation') != 'screen':
             return
-        selection = response['selections'][0]
+        selection = response['selections'][-1 if fault == 'missing_paper' else 0]
         if fault == 'missing_paper':
             response['selections'].pop()
         elif fault == 'unknown_subproblem':
@@ -148,16 +147,16 @@ def test_screening_failure_keeps_safe_reason_and_unreviewed_candidates(store, fa
         else:
             selection['citations'][0]['quote'] = 'private_raw_output'
     run, model, _ = run_research(store, ResearchModel(hook=hook), ResearchSearch(2))
-    assert run.status == RunStatus.PARTIAL and run.total_calls == 3 and run.model_calls == 2
-    assert diagnostic in run.stop_reason and 'private_raw_output' not in run.stop_reason
-    events = [e for e in store.list_events('r') if e.category == 'service_error']
-    assert len(events) == 1 and events[0].message == run.stop_reason
-    assert store.list_selections('r', 1) == [] and store.list_analyses('r') == []
-    assert not any(r.get('operation') in ('extract', 'synthesize') for r in model.requests)
+    assert run.status == RunStatus.PARTIAL
+    assert not [e for e in store.list_events('r') if e.category == 'service_error']
+    selections = store.list_selections('r', 1)
+    failed = [s for s in selections if s.error]
+    assert len(failed) == 1 and diagnostic in failed[0].reason and not failed[0].relevant
+    assert all('private_raw_output' not in s.reason for s in selections)
+    assert any(r.get('operation') == 'extract' for r in model.requests)
     report = store.get_report('r')
-    assert report.stop_reason == run.stop_reason and report.document.sources
-    assert '候选论文组（筛选未完成） 2/6' in report.gaps
-    assert any('2篇候选尚未完成相关性筛选' in gap for gap in report.gaps)
+    assert '1篇候选的筛选结果无效，未纳入' in report.gaps
+    assert failed[0].paper_id in {p.id for p in report.document.excluded_papers}
 
 
 def test_missing_values_cannot_be_filled_without_evidence():
@@ -247,7 +246,8 @@ def test_invalid_analysis_is_recorded_not_disguised_as_empty_fields(store):
     assert run.status == RunStatus.PARTIAL
     assert store.list_analyses('r')[0].status == 'failed'
     assert not store.list_analyses('r')[0].fields
-    assert 'AnalysisError' in run.stop_reason and store.get_report('r')
+    assert any(e.category == 'analysis_failed' and 'AnalysisError' in e.message for e in store.list_events('r'))
+    assert store.get_report('r')
 
 
 def test_limit_does_not_add_free_report_call(store):
@@ -322,3 +322,45 @@ def test_analysis_survives_reopen_and_trash_cleans_new_relations(store):
     store.trash_task('t', True)
     store.delete_trash(['t'])
     assert store.list_analyses('r') == [] and store.list_selections('r', 1) == []
+
+
+def test_one_paper_extraction_failure_does_not_stop_other_papers(store):
+    def hook(request, response):
+        if request.get('operation') == 'extract' and request['paper_id'] == 'p0':
+            response['fields'][0]['citations'][0]['quote'] = 'not in source'
+    run, model, _ = run_research(store, ResearchModel(hook=hook), ResearchSearch(3))
+    analyses = {a.paper_id: a.status for a in store.list_analyses('r', 1)}
+    assert analyses['p0'] == 'failed' and analyses['p1'] == analyses['p2'] == 'completed'
+    assert run.status == RunStatus.PARTIAL and store.get_report('r')
+    assert 'p0：尚无成功的结构化分析' in run.gaps
+
+
+def test_transient_model_errors_retry_within_limits_and_are_counted(store):
+    from backend.app.adapters.llm import LLMError
+
+    class Flaky(ResearchModel):
+        failures = 0
+
+        async def generate(self, messages, **kwargs):
+            if self.failures < 2:
+                self.failures += 1
+                raise LLMError('server_error', 'artificial outage')
+            return await super().generate(messages, **kwargs)
+
+    store.create_run(Run(id='r', task_id='t', initial_topic='Agents'))
+    engine = WorkflowEngine(store, llm_adapter=Flaky(), arxiv_adapter=ResearchSearch(1))
+    engine.retry_delays = (0, 0)
+    run = asyncio.run(engine.execute_run('r'))
+    assert run.status in (RunStatus.COMPLETED, RunStatus.PARTIAL)
+    assert len([e for e in store.list_events('r') if e.category == 'retry']) == 2
+    assert run.model_calls == len(engine.llm.requests) + 2
+
+    class Down(ResearchModel):
+        async def generate(self, messages, **kwargs):
+            raise LLMError('rate_limited', 'artificial outage')
+
+    store.create_run(Run(id='r2', task_id='t', initial_topic='Agents'))
+    engine = WorkflowEngine(store, llm_adapter=Down(), arxiv_adapter=ResearchSearch(1))
+    engine.retry_delays = (0, 0)
+    run = asyncio.run(engine.execute_run('r2'))
+    assert run.status == RunStatus.FAILED and run.total_calls == 3 and run.model_calls == 3

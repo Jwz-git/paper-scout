@@ -48,8 +48,6 @@ class ChatMessage(BaseModel):
 class ConversationUsage(BaseModel):
     model_calls: int = 0
     total_execution_seconds: float = 0.0
-    max_calls: int = 40
-    max_seconds: float = 900.0
     token_usage: Dict[str, Optional[int]] = Field(default_factory=lambda: {
         "prompt_tokens": None, "completion_tokens": None, "total_tokens": None})
 
