@@ -5,10 +5,10 @@
 ## 1. 工作目标与范围
 
 - 以可验证性为最高约束，优先交付能复核、能被推翻、能执行的结果。
-- 首期是本地单用户科研文献调研原型，技术方案为 Python＋FastAPI、Vue 3＋TypeScript、Python 显式状态机与工具适配器。
+- 首期是本地单用户科研文献调研原型，技术方案为 Python＋FastAPI、Vue 3＋TypeScript、对话 agent（模型选择工具、代码执行与核对）与工具适配器（2026-11-06 起取代显式状态机，见 `docs/06-decisions.md`）。
 - 首期使用用户自定义的云端模型（OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）与 arXiv 检索，支持摘要和允许获取的文本型全文 PDF；用户上传、OCR、多用户权限、自动科研实验和投稿不属于当前范围。
-- 用户通过对话发起研究、澄清需求、补充方向和追问资料；主界面采用对话时间线，后台状态机及执行过程是辅助信息，不能用聊天气泡包装强制工作流表单。用户可暂停、补充并继续同一次运行。报告默认 Markdown，结构化报告支持同版本 Word/PDF 导出；历史无结构化快照的报告只保留原 Markdown。
-- 保留用量统计与轮次、调用次数和时间限制，不做金额预算功能。
+- 用户通过对话发起研究、澄清需求、补充方向和追问资料；主界面采用对话时间线，agent 执行过程是辅助信息，不能用聊天气泡包装强制工作流表单。用户可在执行中直接补充，也可随时停止。报告默认 Markdown，结构化报告支持同版本 Word/PDF 导出；历史无结构化快照的报告只保留原 Markdown。
+- 保留用量统计与每轮步数、调用次数和时间限制，不做金额预算功能。
 - 需求与验收见 `docs/01-requirements.md`；具体设计见 `docs/02-architecture.md` 至 `docs/05-development-and-evaluation.md`。
 - `docs/06-decisions.md` 区分已确认选择、建议和待定项。用户实际使用的模型服务及能力、arXiv 在目标网络的可达性尚未确定，不得自行写成已确认事实。
 
@@ -60,7 +60,7 @@
 
 ## 5. 工程边界
 
-- HTTP 层负责输入输出；应用服务负责业务；状态机控制流程；适配器接入检索、模型和 PDF；持久化层保存状态。避免把同一规则分散在前后端或多个适配器中。
+- HTTP 层负责输入输出；应用服务负责业务；agent 循环控制流程并由代码执行限制；适配器接入检索、模型和 PDF；持久化层保存状态。避免把同一规则分散在前后端或多个适配器中。
 - 模型提出计划、提取字段和归纳观点；代码执行外部请求、调用统计、执行限制、状态流转与引用关联。模型输出不能直接执行任意代码、命令或 URL。
 - 新增依赖应直接解决当前需求。实际验证版本兼容后提交依赖清单和对应锁文件；不宣称未验证的版本可用。
 - 中文用于文档、界面说明与必要注释；代码标识符采用清晰一致的英文。对外结构化数据有类型和明确的缺失语义。
@@ -80,7 +80,7 @@
 当前真实可执行命令（仓库根目录）：
 
 ```bash
-PYTHONPATH=. .venv/bin/python -m pytest tests/test_storage.py tests/test_workflow_engine.py tests/test_api_tasks_and_runs.py tests/test_api_health.py -q
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_storage.py tests/test_agent.py tests/test_api_tasks_and_runs.py tests/test_api_health.py -q
 .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 

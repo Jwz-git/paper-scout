@@ -2,10 +2,9 @@ from uuid import uuid4
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from backend.app.domain.models import Task, TaskInput, Run, RunMessage
+from backend.app.domain.models import Task, TaskInput
 from backend.app.domain.conversation import ConversationCreateRequest, ConversationMessageRequest, ConversationView
 from backend.app.storage.conversations import ConversationStore
-from backend.app.services import RunService
 from backend.app.storage.database import Database, StateConflict
 from backend.app.model_settings import ModelSettings, ModelSettingsView, ProviderUpdate, ProviderSaveResult, ModelSelection, ModelCatalogRequest
 from backend.app.adapters.llm import LLMError
@@ -30,7 +29,7 @@ def settings_operation(request, response, operation):
     response.headers["Cache-Control"] = "no-store"
     state = request.app.state
     try:
-        return operation(state.model_settings, (state.db, state.worker, state.engine, state.dialogue))
+        return operation(state.model_settings, (state.db, state.worker, state.agent))
     except StateConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
@@ -102,14 +101,16 @@ def perform(operation):
 
 
 def signal(request):
-    worker = getattr(request.app.state, "worker", None)
+    worker = request.app.state.worker
     if worker is not None:
         worker.notify()
 
 
-class MessageCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    content: str = Field(min_length=1, max_length=4000)
+def stop(request, task_id):
+    ConversationStore(request.app.state.db).stop(task_id)
+    worker = request.app.state.worker
+    if worker is not None:
+        worker.cancel(task_id)
 
 
 @router.post("/tasks", response_model=Task, status_code=201)
@@ -135,52 +136,15 @@ async def task_runs(task_id: str, db=Depends(get_db)):
     return db.list_runs(task_id=task_id)
 
 
-@router.post("/tasks/{task_id}/runs", response_model=Run, status_code=202)
-async def create_run(task_id: str, request: Request, db=Depends(get_db)):
-    task = require_task(db, task_id)
-    run = perform(lambda: RunService(db).create(task))
-    signal(request)
-    return run
-
-
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, db=Depends(get_db)):
     return require_run(db, run_id)
 
 
-@router.post("/runs/{run_id}/pause")
-async def pause_run(run_id: str, db=Depends(get_db)):
-    run = require_run(db, run_id)
-    return perform(lambda: RunService(db).pause(run))
-
-
-@router.post("/runs/{run_id}/resume")
-async def resume_run(run_id: str, request: Request, db=Depends(get_db)):
-    run = perform(lambda: RunService(db).resume(require_run(db,run_id)))
-    signal(request)
-    return run
-
-
-@router.post("/runs/{run_id}/cancel")
-async def cancel_run(run_id: str, db=Depends(get_db)):
-    return perform(lambda: RunService(db).cancel(require_run(db,run_id)))
-
-
-@router.post("/runs/{run_id}/messages", response_model=RunMessage, status_code=201)
-async def add_message(run_id: str, req: MessageCreateRequest, db=Depends(get_db)):
-    return perform(lambda: RunService(db).add_message(require_run(db,run_id),req.content))
-
-
-@router.get("/runs/{run_id}/messages")
-async def messages(run_id: str, db=Depends(get_db)):
-    require_run(db, run_id)
-    return db.list_run_messages(run_id)
-
-
 @router.get("/runs/{run_id}/events")
-async def events(run_id: str, db=Depends(get_db)):
+async def events(run_id: str, turn_id: Optional[str] = Query(None, max_length=200), db=Depends(get_db)):
     require_run(db, run_id)
-    return db.list_events(run_id)
+    return db.list_events(run_id, turn_id)
 
 
 @router.get("/runs/{run_id}/papers")
@@ -302,7 +266,7 @@ async def trash_conversation(task_id: str, request: Request, db=Depends(get_db))
         raise HTTPException(404, "对话不存在")
     if task.deleted_at is None:
         with db._get_connection():
-            ConversationStore(db).stop(task_id)
+            stop(request, task_id)
             task = db.trash_task(task_id, True)
     signal(request)
     return task
@@ -320,13 +284,13 @@ async def create_conversation(req: ConversationCreateRequest, request: Request, 
     store = ConversationStore(db)
     task_id = perform(lambda: store.enqueue(req))
     signal(request)
-    return store.view(task_id, request.app.state.dialogue.llm is not None)
+    return store.view(task_id, request.app.state.agent.llm is not None)
 
 
 @router.get("/conversations/{task_id}", response_model=ConversationView)
 async def conversation(task_id: str, request: Request, db=Depends(get_db)):
     require_task(db, task_id)
-    return ConversationStore(db).view(task_id, request.app.state.dialogue.llm is not None)
+    return ConversationStore(db).view(task_id, request.app.state.agent.llm is not None)
 
 
 @router.post("/conversations/{task_id}/messages", response_model=ConversationView, status_code=202)
@@ -335,13 +299,12 @@ async def conversation_message(task_id: str, req: ConversationMessageRequest, re
     store = ConversationStore(db)
     perform(lambda: store.enqueue(req, task_id))
     signal(request)
-    return store.view(task_id, request.app.state.dialogue.llm is not None)
+    return store.view(task_id, request.app.state.agent.llm is not None)
 
 
 @router.post("/conversations/{task_id}/stop", response_model=ConversationView)
 async def stop_conversation(task_id: str, request: Request, db=Depends(get_db)):
     require_task(db, task_id)
-    store = ConversationStore(db)
-    store.stop(task_id)
+    stop(request, task_id)
     signal(request)
-    return store.view(task_id, request.app.state.dialogue.llm is not None)
+    return ConversationStore(db).view(task_id, request.app.state.agent.llm is not None)

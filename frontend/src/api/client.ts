@@ -18,10 +18,16 @@ export interface ModelSettings {
   active_provider_id: string | null;
   active_model: string | null;
   providers: AiProvider[];
-  limits: {
-    research: { max_rounds: number; max_calls: number; max_seconds: number };
-    conversation: { calls_per_turn: number; seconds_per_turn: number };
-  };
+  limits: { agent: AgentLimits };
+}
+
+export interface AgentLimits {
+  steps: number;
+  calls: number;
+  seconds: number;
+  fulltexts: number;
+  readers: number;
+  reader_steps: number;
 }
 
 export interface AiProvider {
@@ -67,7 +73,7 @@ export interface TokenUsage {
   total_tokens: number | null;
 }
 
-export type ChatMode = "auto" | "research" | "ask" | "pause" | "resume" | "cancel";
+export type ChatMode = "auto" | "research" | "ask";
 export type ChatStatus = "queued" | "processing" | "completed" | "failed" | "interrupted";
 export type SourceType = "metadata" | "abstract" | "fulltext";
 
@@ -81,6 +87,30 @@ export interface ChatCitation {
   quote: string;
   location_start: number | null;
   location_end: number | null;
+  evidence_id?: string | null;
+}
+
+export interface TodoItem {
+  text: string;
+  status: "pending" | "in_progress" | "done";
+}
+
+// 一轮 agent 工作的状态；执行中由服务端持续保存。
+export interface AgentWork {
+  run_id: string;
+  activity: string | null;
+  steps: number;
+  calls: number;
+  model_calls: number;
+  seconds: number;
+  progress_at: string | null;
+  todos: TodoItem[];
+  subagents: number;
+  report_id: string | null;
+  stop_reason: string | null;
+  // 执行中收到新消息后，工作转到新消息的回复下继续。
+  continued: boolean;
+  limits: AgentLimits;
 }
 
 export interface ChatMessage {
@@ -89,9 +119,9 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   status: ChatStatus;
-  action?: "research" | "answer" | "clarify" | "pause" | "resume" | "cancel" | null;
   run_id?: string | null;
   citations: ChatCitation[];
+  work?: AgentWork | null;
   created_at: string;
   error_category?: string | null;
 }
@@ -137,7 +167,9 @@ export interface Run {
   initial_topic: string;
   initial_input?: Omit<Task, "id" | "created_at" | "updated_at"> | null;
   current_input?: Omit<Task, "id" | "created_at" | "updated_at"> | null;
-  model_calls?: number;
+  // 对话 agent 的工作区：每个对话一份，跨轮次保存资料；旧版调研运行为 false。
+  agent?: boolean;
+  model_calls: number;
   token_usage?: TokenUsage;
   status: RunStatus;
   stage: RunStage;
@@ -155,22 +187,14 @@ export interface Run {
   ended_at?: string | null;
 }
 
-export interface RunMessage {
-  id: string;
-  run_id: string;
-  content: string;
-  status: string;
-  impact_summary?: string | null;
-  created_at: string;
-}
-
 export interface RunEvent {
   id: string;
   run_id: string;
-  stage: RunStage;
-  analysis_revision?: number;
   category: string;
   message: string;
+  // 所属助手消息；actor 为 agent、user 或 reader:{paper_id}。
+  turn_id?: string | null;
+  actor?: string | null;
   created_at: string;
 }
 
@@ -414,50 +438,22 @@ export async function createTask(payload: {
   })).json();
 }
 
-export async function startRun(taskId: string, signal?: AbortSignal): Promise<Run> {
-  return (await request(`/tasks/${taskId}/runs`, { method: "POST", signal })).json();
-}
-
 export async function getRun(runId: string, signal?: AbortSignal): Promise<Run> {
   return (await request(`/runs/${runId}`, { signal })).json();
 }
 
-export async function pauseRun(runId: string, signal?: AbortSignal): Promise<Run> {
-  return (await request(`/runs/${runId}/pause`, { method: "POST", signal })).json();
-}
-
-export async function resumeRun(runId: string, signal?: AbortSignal): Promise<Run> {
-  return (await request(`/runs/${runId}/resume`, { method: "POST", signal })).json();
-}
-
-export async function cancelRun(runId: string, signal?: AbortSignal): Promise<Run> {
-  return (await request(`/runs/${runId}/cancel`, { method: "POST", signal })).json();
-}
-
-export async function addRunMessage(runId: string, content: string, signal?: AbortSignal): Promise<RunMessage> {
-  return (await request(`/runs/${runId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-    signal,
-  })).json();
-}
-
-export async function getRunMessages(runId: string, signal?: AbortSignal): Promise<RunMessage[]> {
-  return (await request(`/runs/${runId}/messages`, { signal })).json();
-}
-
-export async function getRunEvents(runId: string, signal?: AbortSignal): Promise<RunEvent[]> {
-  return (await request(`/runs/${runId}/events`, { signal })).json();
+export async function getRunEvents(runId: string, turnId: string, signal?: AbortSignal): Promise<RunEvent[]> {
+  return (await request(`/runs/${encodeURIComponent(runId)}/events?turn_id=${encodeURIComponent(turnId)}`, { signal })).json();
 }
 
 export async function getPapers(runId: string, signal?: AbortSignal): Promise<Paper[]> {
   return (await request(`/runs/${runId}/papers`, { signal })).json();
 }
 
-export async function getReport(runId: string, signal?: AbortSignal): Promise<Report> {
-  // 404 是运行不存在；409 是已有运行尚无报告，由界面分别展示。
-  return (await request(`/runs/${runId}/report`, { signal })).json();
+export async function getReport(runId: string, reportId: string | null, signal?: AbortSignal): Promise<Report> {
+  // 404 是运行或指定报告不存在；409 是已有运行尚无报告，由界面分别展示。不指定版本时返回最新报告。
+  const query = reportId ? `?report_id=${encodeURIComponent(reportId)}` : '';
+  return (await request(`/runs/${runId}/report${query}`, { signal })).json();
 }
 
 export async function getResearchAnalysis(runId: string, signal?: AbortSignal): Promise<ResearchAnalysis> {

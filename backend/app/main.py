@@ -7,17 +7,17 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 
+from backend.app.agent.service import AgentService
+from backend.app.agent.worker import SerialWorker
 from backend.app.api.routes import router
 from backend.app.config import Settings
 from backend.app.model_settings import ModelSettingsService
 from backend.app.storage.database import Database
-from backend.app.workflow.engine import WorkflowEngine
-from backend.app.workflow.worker import SerialWorker
 
 LOCAL_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8000", "http://localhost:8000"}
 
 
-def create_app(config=None, db=None, engine=None, run_worker=True):
+def create_app(config=None, db=None, agent=None, run_worker=True):
     @asynccontextmanager
     async def lifespan(app):
         cfg = config if config is not None else Settings()
@@ -25,16 +25,13 @@ def create_app(config=None, db=None, engine=None, run_worker=True):
         own_store = db is None
         app.state.db = store
         app.state.model_settings = ModelSettingsService(cfg)
-        if engine is None:
+        if agent is None:
             from backend.app.adapters.arxiv import ArXivAdapter
-            llm = app.state.model_settings.adapter()
-            runner = WorkflowEngine(store, arxiv_adapter=ArXivAdapter(user_agent=cfg.arxiv_user_agent,rate_limit_seconds=cfg.arxiv_rate_limit_seconds),llm_adapter=llm)
+            app.state.agent = AgentService(store, app.state.model_settings.adapter(),
+                arxiv=ArXivAdapter(user_agent=cfg.arxiv_user_agent, rate_limit_seconds=cfg.arxiv_rate_limit_seconds))
         else:
-            runner = engine
-        from backend.app.dialogue import DialogueService
-        app.state.engine = runner
-        app.state.dialogue = DialogueService(store, getattr(runner, "llm", None))
-        app.state.worker = SerialWorker(store, runner, app.state.dialogue) if run_worker else None
+            app.state.agent = agent
+        app.state.worker = SerialWorker(store, app.state.agent) if run_worker else None
         job = asyncio.create_task(app.state.worker.serve()) if run_worker else None
         try:
             yield
@@ -69,7 +66,7 @@ def create_app(config=None, db=None, engine=None, run_worker=True):
     @app.get("/api/health",tags=["system"])
     async def health(request: Request):
         return {"status":"ok","app":"Paper Scout","version":"0.1.0",
-                "model_configured": request.app.state.dialogue.llm is not None}
+                "model_configured": request.app.state.agent.llm is not None}
 
     app.include_router(router)
     return app

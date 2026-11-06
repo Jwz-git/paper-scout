@@ -74,7 +74,7 @@
                   <p class="model-save-explainer">{{ saveExplainer }}</p>
                   <div class="model-editor-actions"><button type="button" class="settings-secondary" :disabled="saving" @click="requestEditorClose">取消</button><button type="submit" class="settings-save" :disabled="!canSave"><UiIcon :name="saving ? 'refresh' : 'check'" />{{ saving ? '正在保存…' : '保存供应商' }}</button></div>
                 </form>
-                <div v-if="settings.busy" class="settings-notice"><UiIcon name="clock" /><p>对话或研究进行中，结束或暂停后才能修改或删除当前供应商。</p><button type="button" class="text-button" :disabled="saving" @click="refreshBusy">刷新状态</button></div>
+                <div v-if="settings.busy" class="settings-notice"><UiIcon name="clock" /><p>对话执行中，当前这一轮结束或停止后才能修改或删除当前供应商。</p><button type="button" class="text-button" :disabled="saving" @click="refreshBusy">刷新状态</button></div>
                 <div v-if="saveError" class="settings-error model-operation-error" role="alert"><UiIcon name="info" /><p>{{ saveError }}</p></div>
                 <p v-if="!editorOpen && providers.length" class="settings-privacy"><UiIcon name="shield" />对话内容与相关来源会发送至所选供应商。</p>
               </section>

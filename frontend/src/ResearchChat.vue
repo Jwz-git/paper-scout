@@ -73,15 +73,12 @@
             v-if="conversation?.runs.length"
             ref="artifactToggleButton"
             class="artifact-toggle"
-            aria-label="查看资料与报告"
+            aria-label="查看本对话资料"
             :aria-expanded="panelOpen"
-            :disabled="!conversation?.runs.length"
-            :title="conversation?.runs.length ? '查看本会话保存的资料与报告' : '发起研究后可查看文献与阶段性报告'"
             @click="togglePanel"
           >
             <UiIcon name="documents" />
-            <span>资料与报告</span>
-            <small v-if="conversation?.runs.length">{{ conversation.runs.length }}</small>
+            <span>本对话资料</span>
           </button>
         </div>
       </header>
@@ -116,48 +113,40 @@
                 </section>
                 <article v-else class="message" :class="[entry.message.role, entry.message.status]" :aria-label="entry.message.role === 'user' ? '用户消息' : '助手消息'">
                   <div class="message-body">
-                    <div v-if="activityRun(entry.message)" class="turn-activity">
-                      <div class="activity-head">
-                        <details class="process-records" :open="processState(activityRun(entry.message)!.id).open" @toggle="onProcessToggle(activityRun(entry.message)!.id, $event)">
-                          <summary>
-                            <span class="process-label"><UiIcon name="process" />{{ activitySummary(activityRun(entry.message)!) }}</span>
-                            <span class="process-summary">{{ runLabels[activityRun(entry.message)!.status] }} · {{ stageLabels[activityRun(entry.message)!.stage] }} · {{ activityRun(entry.message)!.current_round }}/{{ activityRun(entry.message)!.max_rounds }} 轮</span>
-                          </summary>
-                          <div class="process-content">
-                            <p v-if="processState(activityRun(entry.message)!.id).loading" class="muted" role="status">正在读取过程记录…</p>
-                            <p v-if="processState(activityRun(entry.message)!.id).error" class="error-message" role="alert">{{ processState(activityRun(entry.message)!.id).error }} <button class="text-button" @click="loadProcess(activityRun(entry.message)!.id)">重试</button></p>
-                            <ol v-if="processState(activityRun(entry.message)!.id).events.length" class="event-list">
-                              <li v-for="event in processState(activityRun(entry.message)!.id).events" :key="event.id"><time>{{ formatTime(event.created_at) }}</time><span>{{ stageLabels[event.stage] }} · {{ event.category }}</span><p>{{ event.message }}</p></li>
-                            </ol>
-                            <p v-else-if="!processState(activityRun(entry.message)!.id).loading && !processState(activityRun(entry.message)!.id).error" class="muted">暂无已保存的执行记录。</p>
-                            <p v-if="activityRun(entry.message)!.stop_reason" class="muted">停止说明：{{ activityRun(entry.message)!.stop_reason }}</p>
-                            <ul v-if="activityRun(entry.message)!.gaps.length" class="gap-list"><li v-for="gap in activityRun(entry.message)!.gaps" :key="gap">{{ gap }}</li></ul>
-                          </div>
-                        </details>
-                        <div class="activity-actions">
-                          <details data-menu class="usage-details">
-                            <summary>用量<UiIcon name="chevronDown" /></summary>
-                            <div>
-                              <h3>本次会话用量</h3>
-                              <p>累计模型调用：{{ conversation?.usage.model_calls }}</p>
-                              <p>累计执行：{{ conversation?.usage.total_execution_seconds.toFixed(1) }} 秒</p>
-                              <p>Token：{{ tokenText(conversation?.usage.token_usage.total_tokens ?? null) }}</p>
-                              <p>输入 / 输出：{{ tokenText(conversation?.usage.token_usage.prompt_tokens ?? null) }} / {{ tokenText(conversation?.usage.token_usage.completion_tokens ?? null) }}</p>
-                              <p>本次运行外部调用：{{ activityRun(entry.message)!.total_calls }} / {{ activityRun(entry.message)!.max_calls }}</p>
-                              <p>本次运行执行上限：{{ activityRun(entry.message)!.max_seconds }} 秒</p>
-                              <p>本次运行轮次：{{ activityRun(entry.message)!.current_round }} / {{ activityRun(entry.message)!.max_rounds }}</p>
-                            </div>
-                          </details>
-                          <button v-if="canPauseRun(activityRun(entry.message)!)" :disabled="controlsDisabled" @click="sendControl('pause')">暂停</button>
-                          <button v-if="canResumeRun(activityRun(entry.message)!)" :disabled="controlsDisabled" @click="sendControl('resume')">继续</button>
+                    <div v-if="entry.message.work" class="turn-activity">
+                      <template v-if="entry.message.status === 'processing'">
+                        <p class="work-activity" role="status"><span class="processing-indicator" aria-hidden="true"></span><span>{{ entry.message.work.activity || '正在处理' }}</span></p>
+                        <ul v-if="entry.message.work.todos.length" class="todo-list" aria-label="计划">
+                          <li v-for="(item, index) in entry.message.work.todos" :key="index" :class="item.status"><UiIcon v-if="item.status === 'done'" name="check" /><span v-else class="todo-dot" aria-hidden="true"></span><span class="sr-only">{{ todoLabels[item.status] }}：</span>{{ item.text }}</li>
+                        </ul>
+                      </template>
+                      <details class="process-records" :open="processState(entry.message.id).open" @toggle="onProcessToggle(entry.message.id, $event)">
+                        <summary><span class="process-label"><UiIcon name="process" />{{ workSummary(entry.message) }}</span></summary>
+                        <div class="process-content">
+                          <p v-if="processState(entry.message.id).loading" class="muted" role="status">正在读取过程记录…</p>
+                          <p v-if="processState(entry.message.id).error" class="error-message" role="alert">{{ processState(entry.message.id).error }} <button class="text-button" @click="loadProcess(entry.message.id)">重试</button></p>
+                          <ol v-if="processState(entry.message.id).items.length" class="event-list">
+                            <template v-for="item in processState(entry.message.id).items" :key="item.id">
+                              <li v-if="item.kind === 'event'"><time :datetime="item.event.created_at">{{ clockTime(item.event.created_at) }}</time><span>{{ eventLabels[item.event.category] || item.event.category }}</span><p>{{ item.event.message }}</p></li>
+                              <li v-else class="reader-group">
+                                <span>阅读子 agent · {{ item.paperId }}</span>
+                                <ol class="event-list">
+                                  <li v-for="event in item.events" :key="event.id"><time :datetime="event.created_at">{{ clockTime(event.created_at) }}</time><span>{{ eventLabels[event.category] || event.category }}</span><p>{{ event.message }}</p></li>
+                                </ol>
+                              </li>
+                            </template>
+                          </ol>
+                          <p v-else-if="!processState(entry.message.id).loading && !processState(entry.message.id).error" class="muted">还没有记录。</p>
                         </div>
-                      </div>
+                      </details>
+                      <p v-if="entry.message.work.stop_reason" class="work-note">提前结束：{{ entry.message.work.stop_reason }}</p>
+                      <p v-if="entry.message.work.continued" class="work-note">收到新消息，后续工作在下一条回复中继续。</p>
                     </div>
                     <template v-if="entry.message.content">
                       <p v-if="entry.message.role === 'user'" class="message-text" :title="formatTime(entry.message.created_at)">{{ entry.message.content }}</p>
                       <MessageMarkdown v-else :content="entry.message.content" />
                     </template>
-                    <p v-else class="processing-placeholder" role="status"><span v-if="['queued', 'processing'].includes(entry.message.status)" class="processing-indicator" aria-hidden="true"></span>{{ messageLabels[entry.message.status] }}…</p>
+                    <p v-else-if="!entry.message.work" class="processing-placeholder" role="status"><span v-if="['queued', 'processing'].includes(entry.message.status)" class="processing-indicator" aria-hidden="true"></span>{{ messageLabels[entry.message.status] }}…</p>
                     <span v-if="entry.message.content && entry.message.status !== 'completed'" class="message-status" :class="entry.message.status">{{ messageLabels[entry.message.status] }}</span>
                     <p v-if="entry.message.error_category" class="error-message" role="alert">错误类别：{{ entry.message.error_category }}</p>
                     <div v-if="entry.message.citations.length" class="citation-buttons" aria-label="回答引用">
@@ -165,8 +154,9 @@
                         <span>[{{ index + 1 }}]</span>{{ sourceLabels[citation.source_type] }}{{ citation.page_number != null ? ` · p${citation.page_number}` : '' }}<UiIcon name="arrowUpRight" />
                       </button>
                     </div>
-                    <div v-if="entry.message.role === 'assistant' && (entry.message.content || entry.message.run_id)" class="message-actions">
+                    <div v-if="entry.message.role === 'assistant' && (entry.message.content || entry.message.run_id || entry.message.work?.report_id)" class="message-actions">
                       <button v-if="entry.message.content && entry.message.status === 'completed'" class="message-copy icon-button" type="button" aria-label="复制回复" title="复制回复" @click="copyMessage(entry.message.content)"><UiIcon name="copy" /></button>
+                      <button v-if="entry.message.work?.report_id" class="message-artifact text-button" @click="openReport(entry.message.work!)"><UiIcon name="documents" />查看报告</button>
                       <button v-if="entry.message.run_id" class="message-artifact text-button" @click="openRun(entry.message.run_id!)"><UiIcon name="documents" />查看调研资料</button>
                       <time :datetime="entry.message.created_at">{{ formatTime(entry.message.created_at) }}</time>
                     </div>
@@ -192,7 +182,7 @@
               <div class="composer-options">
                 <details ref="modelMenu" data-menu class="model-menu" @toggle="onModelMenuToggle">
                   <summary aria-label="选择当前模型" :title="currentProvider?.name"><span>{{ modelSettings?.enabled ? modelSettings.model : '选择模型' }}</span><UiIcon name="chevronDown" /></summary>
-                  <div class="model-menu-options"><p>选择用于后续对话的模型</p><div v-for="provider in availableProviders" :key="provider.id" class="model-menu-provider"><p>{{ provider.name }}</p><button v-for="model in provider.models" :key="model" type="button" :disabled="modelChangeBusy || settingsBusy || !!modelSettings?.busy" :aria-label="`${provider.name} · ${model}`" :aria-pressed="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" @click="chooseModel(provider.id, model)"><span><strong>{{ model }}</strong></span><UiIcon v-if="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" name="check" /></button></div><p v-if="modelSettings?.busy">执行中的工作结束或暂停后可切换。</p><button type="button" class="manage-models" @click="closeMenus(); openSettings('model')"><UiIcon name="settings" />管理AI服务</button></div>
+                  <div class="model-menu-options"><p>选择用于后续对话的模型</p><div v-for="provider in availableProviders" :key="provider.id" class="model-menu-provider"><p>{{ provider.name }}</p><button v-for="model in provider.models" :key="model" type="button" :disabled="modelChangeBusy || settingsBusy || !!modelSettings?.busy" :aria-label="`${provider.name} · ${model}`" :aria-pressed="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" @click="chooseModel(provider.id, model)"><span><strong>{{ model }}</strong></span><UiIcon v-if="modelSettings?.enabled && provider.id === modelSettings.active_provider_id && model === modelSettings.active_model" name="check" /></button></div><p v-if="modelSettings?.busy">当前这一轮结束或停止后可切换。</p><button type="button" class="manage-models" @click="closeMenus(); openSettings('model')"><UiIcon name="settings" />管理AI服务</button></div>
                 </details>
                 <details ref="intentMenu" data-menu class="intent-menu">
                   <summary aria-label="选择消息意图"><UiIcon :name="currentMode === 'research' ? 'search' : currentMode === 'ask' ? 'book' : 'chat'" />{{ modeLabels[currentMode] }}<UiIcon name="chevronDown" /></summary>
@@ -200,16 +190,16 @@
                     <button v-for="mode in intentModes" :key="mode" type="button" :class="{ selected: currentMode === mode }" :aria-pressed="currentMode === mode" @click="chooseMode(mode)"><span>{{ modeLabels[mode] }}</span><small>{{ modeDescriptions[mode] }}</small></button>
                   </div>
                 </details>
-                <span class="input-hint">{{ conversation?.busy ? '等待当前回复完成再发送' : isResearchRunning ? '可直接补充，系统会保存检查点' : 'Enter 发送 · Shift + Enter 换行' }}</span>
               </div>
               <div class="send-group">
                 <span v-if="draft.length" class="char-count">{{ draft.length }}/{{ inputLimit }}</span>
-                <button v-if="isResearchRunning || conversation?.busy" type="button" class="send-button stop-button" aria-label="停止" :title="stopBusy ? '正在停止…' : '停止当前工作'" :disabled="!!currentPending || stopBusy" @click="stopWork"><UiIcon name="stop" /></button>
-                <button v-if="!conversation?.busy && (!isResearchRunning || draft.trim())" type="submit" class="send-button" aria-label="发送消息" :disabled="!canSend"><UiIcon name="arrowUp" /></button>
+                <button v-if="conversation?.busy" type="button" class="send-button stop-button" aria-label="停止" :title="stopBusy ? '正在停止…' : '停止当前工作'" :disabled="!!currentPending || stopBusy" @click="stopWork"><UiIcon name="stop" /></button>
+                <button v-if="!conversation?.busy || draft.trim()" type="submit" class="send-button" aria-label="发送消息" :disabled="!canSend"><UiIcon name="arrowUp" /></button>
               </div>
             </div>
           </form>
           <div class="composer-footnote">
+            <span v-if="conversation?.busy" class="busy-hint">执行中也可以发送，agent 会在当前这一步之后读到</span>
             <button type="button" class="model-status" title="AI服务与模型选择" @click="availableProviders.length && !modelConfigured ? openModelPicker() : openSettings('model')">{{ modelConfigured === true ? '模型已配置' : modelConfigured === false ? availableProviders.length ? '请选择模型' : '配置AI服务' : healthError ? '连接状态未知 · 设置' : 'AI服务' }}</button>
           </div>
         </footer>
@@ -231,15 +221,15 @@
       aria-labelledby="materials-title"
     >
       <header class="panel-header">
-        <h2 id="materials-title"><UiIcon name="documents" />资料与报告</h2>
+        <h2 id="materials-title"><UiIcon name="documents" />本对话资料</h2>
         <button ref="panelCloseButton" class="icon-button" aria-label="关闭资料面板" @click="closePanel"><UiIcon name="close" /></button>
       </header>
       <div class="panel-content">
-        <details ref="runMenu" data-menu class="run-picker">
-          <summary>{{ selectedRun ? `调研 ${runNumber(selectedRun.id)} · ${runLabels[selectedRun.status]}` : '选择一次调研' }}<UiIcon name="chevronDown" /></summary>
-          <div><button v-for="run in sortedRuns" :key="run.id" :class="{ selected: selectedRunId === run.id }" :aria-pressed="selectedRunId === run.id" @click="chooseRun(run.id)"><strong>调研 {{ runNumber(run.id) }} · {{ runLabels[run.status] }}</strong><small>{{ formatTime(run.created_at) }} · {{ run.initial_topic }}</small></button></div>
+        <details v-if="sortedRuns.length > 1" ref="runMenu" data-menu class="run-picker">
+          <summary>{{ selectedRun ? runTitle(selectedRun) : '选择资料' }}<UiIcon name="chevronDown" /></summary>
+          <div><button v-for="run in sortedRuns" :key="run.id" :class="{ selected: selectedRunId === run.id }" :aria-pressed="selectedRunId === run.id" @click="chooseRun(run.id)"><strong>{{ runTitle(run) }}</strong><small>{{ formatTime(run.created_at) }} · {{ run.initial_topic }}</small></button></div>
         </details>
-        <p v-if="selectedRun" class="panel-note">{{ selectedRun.initial_input?.topic || selectedRun.initial_topic }}</p>
+        <p v-if="selectedRun && !selectedRun.agent" class="panel-note">{{ selectedRun.initial_input?.topic || selectedRun.initial_topic }}</p>
         <div class="panel-tabs" aria-label="资料类型">
           <button :class="{ active: panelTab === 'papers' }" :aria-pressed="panelTab === 'papers'" @click="panelTab = 'papers'"><UiIcon name="book" />文献<span v-if="artifact?.loaded">{{ artifact.papers.length }}</span></button>
           <button :class="{ active: panelTab === 'analysis' }" :aria-pressed="panelTab === 'analysis'" @click="panelTab = 'analysis'; clearPaper()">分析与比较</button>
@@ -259,7 +249,7 @@
               <span class="paper-copy"><span class="paper-title">{{ paper.title }}</span><small>{{ paper.year ?? '年份缺失' }} · {{ paper.authors.slice(0, 2).join('、') || '作者缺失' }}{{ paper.authors.length > 2 ? ' 等' : '' }}</small><span class="paper-link">查看来源与读取状态</span></span>
               <UiIcon name="arrowUpRight" />
             </button>
-            <p v-if="artifact?.loaded && !artifact.papers.length" class="muted">本次成功读取的检索结果中暂无已选论文。</p>
+            <p v-if="artifact?.loaded && !artifact.papers.length" class="muted">暂无已纳入的论文。</p>
           </template>
         </template>
         <ResearchAnalysisView v-else-if="panelTab === 'analysis' && selectedRun" :run="selectedRun" @paper="openPaper" />
@@ -301,9 +291,9 @@ import ActionDialog from './components/ActionDialog.vue';
 import TrashDialog from './components/TrashDialog.vue';
 import { useDismissableMenus, closeMenus } from './composables/useDismissableMenus';
 import { usePreferences } from './composables/usePreferences';
-import { runLabels, stageLabels } from './runLabels';
+import { eventLabels, runLabels, todoLabels } from './runLabels';
 import type { ModelSettings } from './api/client';
-import { ApiError, getModelSettings, selectProviderModel, renameConversation, trashConversation, restoreConversation, getConversations, getConversation, sendConversationMessage, stopConversation, getPapers, getRunEvents, getReport, getPaperDetail, getReportFile, type Task, type ConversationView, type ChatMode, type ChatMessage, type ChatCitation, type Run, type RunStatus, type ChatStatus, type SourceType, type Paper, type Report, type RunEvent, type PaperDetail } from './api/client.ts';
+import { ApiError, getModelSettings, selectProviderModel, renameConversation, trashConversation, restoreConversation, getConversations, getConversation, sendConversationMessage, stopConversation, getPapers, getRunEvents, getReport, getPaperDetail, getReportFile, type Task, type ConversationView, type ChatMode, type ChatMessage, type ChatCitation, type AgentWork, type Run, type ChatStatus, type SourceType, type Paper, type Report, type RunEvent, type PaperDetail } from './api/client.ts';
 
 const NEW_CHAT = '__new__';
 useDismissableMenus();
@@ -386,34 +376,11 @@ const currentMode = computed(() => modes[selectedKey.value] || preferences.defau
 const currentPending = computed(() => pending[selectedKey.value]);
 const inputLimit = computed(() => selectedKey.value === NEW_CHAT ? 2000 : 4000);
 const stopBusy = ref(false);
-const canSend = computed(() => !(availableProviders.value.length && modelConfigured.value === false) && !!draft.value.trim() && !stopBusy.value && !currentPending.value && !conversation.value?.busy && !conversationLoading.value && (selectedKey.value === NEW_CHAT || !!conversation.value));
-const terminal = new Set<RunStatus>(['completed', 'partial', 'failed', 'cancelled', 'interrupted']);
-const running = new Set<RunStatus>(['queued', 'running', 'pause_requested']);
+const canSend = computed(() => !(availableProviders.value.length && modelConfigured.value === false) && !!draft.value.trim() && !stopBusy.value && !currentPending.value && !conversationLoading.value && (selectedKey.value === NEW_CHAT || !!conversation.value));
 const sortedRuns = computed(() => [...(conversation.value?.runs || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)));
 const latestRun = computed(() => sortedRuns.value[0]);
-const activeRun = computed(() => sortedRuns.value.find(run => !terminal.has(run.status)));
-const isResearchRunning = computed(() => !!activeRun.value && running.has(activeRun.value.status));
-// 暂停／继续按所属运行判断，随内联活动行一起出现在该回合内。
-const canPauseRun = (run: Run) => ['queued', 'running'].includes(run.status);
-const canResumeRun = (run: Run) => ['paused', 'needs_input'].includes(run.status);
-const runsById = computed(() => new Map((conversation.value?.runs || []).map(run => [run.id, run])));
-// 同一次运行可能产生多条助手消息：模型回答先保存并带上 run_id，随后 record_run 再追加一条
-// 同 run_id 的运行状态摘要。执行活动属于该运行的模型回答，因此挂在最早的那条消息上，
-// 显示在回答之前；若挂到最后一条会跑到回答下方，与执行先于结论的顺序相反。
-const activityRunIds = computed(() => {
-  const firstMessageByRun = new Map<string, string>();
-  for (const message of conversation.value?.messages || []) {
-    const runId = message.run_id;
-    if (runId && runsById.value.has(runId) && !firstMessageByRun.has(runId)) firstMessageByRun.set(runId, message.id);
-  }
-  const ids = new Map<string, Run>();
-  for (const [runId, messageId] of firstMessageByRun) ids.set(messageId, runsById.value.get(runId)!);
-  // 运行中尚未产生回答消息时（run_id 要到 finish 才写入），活动先挂在排队中的助手占位消息上。
-  const pending = (conversation.value?.messages || []).find(message => message.role === 'assistant' && message.status !== 'completed' && !message.run_id);
-  if (activeRun.value && pending && !firstMessageByRun.has(activeRun.value.id)) ids.set(pending.id, activeRun.value);
-  return ids;
-});
-const activityRun = (message: ChatMessage): Run | null => activityRunIds.value.get(message.id) || null;
+const legacyOrder = computed(() => (conversation.value?.runs || []).filter(run => !run.agent).sort((a, b) => a.created_at.localeCompare(b.created_at)).map(run => run.id));
+const runTitle = (run: Run) => run.agent ? '对话 agent' : `调研 ${runNumber(run.id)} · ${runLabels[run.status]}`;
 const elapsedText = (seconds: number) => {
   const total = Math.max(0, Math.round(seconds));
   const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const rest = total % 60;
@@ -421,24 +388,29 @@ const elapsedText = (seconds: number) => {
   if (minutes) return `${minutes}m ${rest}s`;
   return rest === 0 ? '<1s' : `${rest}s`;
 };
-// 与 Codex 的一次运行摘要同形：已用时间 · 外部调用 · 模型调用。只用运行自身已保存的计数，
-// 不推断尚未加载的资料数量。
-const activitySummary = (run: Run) => {
-  const parts = [`已用 ${elapsedText(run.total_execution_seconds)}`];
-  if (run.total_calls) parts.push(`外部调用 ${run.total_calls}/${run.max_calls}`);
-  if (run.model_calls) parts.push(`模型调用 ${run.model_calls}`);
+// 服务端只在外部调用和步骤边界保存耗时；执行中按最近一次保存时间在本地续算，避免长时间模型调用期间计时停住。
+const clock = ref(Date.now());
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+const liveSeconds = (message: ChatMessage, work: AgentWork) => message.status === 'processing' && work.progress_at ? work.seconds + Math.max(0, (clock.value - Date.parse(work.progress_at)) / 1000) : work.seconds;
+function workSummary(message: ChatMessage) {
+  const work = message.work!;
+  if (message.status === 'processing') return `第 ${work.steps}/${work.limits.steps} 步 · 外部调用 ${work.calls}/${work.limits.calls} · 已用 ${elapsedText(liveSeconds(message, work))}`;
+  const parts = [`${work.steps} 步`, `外部调用 ${work.calls} 次`];
+  if (work.subagents) parts.push(`阅读子 agent ${work.subagents} 个`);
+  parts.push(`用时 ${elapsedText(work.seconds)}`);
   return parts.join(' · ');
-};
-const controlsDisabled = computed(() => stopBusy.value || !!currentPending.value || !!conversation.value?.busy);
+}
 const selectedRunId = computed(() => selectedRuns[selectedKey.value] || latestRun.value?.id || '');
 const selectedRun = computed(() => conversation.value?.runs.find(run => run.id === selectedRunId.value));
-const legacyRuns = computed(() => (conversation.value?.runs || []).filter(run => !conversation.value?.messages.some(message => message.run_id === run.id)));
+const legacyRuns = computed(() => (conversation.value?.runs || []).filter(run => !run.agent && !conversation.value?.messages.some(message => message.run_id === run.id)));
+// 执行中连发的消息并入同一轮后，中间的助手回复既无内容也无工作记录，不显示。
+const hidden = (message: ChatMessage) => message.role === 'assistant' && message.status === 'completed' && !message.content && !message.work;
 type TimelineEntry = { kind: 'message'; id: string; created_at: string; message: ChatMessage } | { kind: 'run'; id: string; created_at: string; run: Run };
-const timeline = computed<TimelineEntry[]>(() => [...(conversation.value?.messages || []).map(message => ({ kind: 'message' as const, id: message.id, created_at: message.created_at, message })), ...legacyRuns.value.map(run => ({ kind: 'run' as const, id: run.id, created_at: run.created_at, run }))].sort((a, b) => a.created_at.localeCompare(b.created_at)));
+const timeline = computed<TimelineEntry[]>(() => [...(conversation.value?.messages || []).filter(message => !hidden(message)).map(message => ({ kind: 'message' as const, id: message.id, created_at: message.created_at, message })), ...legacyRuns.value.map(run => ({ kind: 'run' as const, id: run.id, created_at: run.created_at, run }))].sort((a, b) => a.created_at.localeCompare(b.created_at)));
 const messageLabels: Record<ChatStatus, string> = { queued: '等待处理', processing: '正在处理', completed: '已完成', failed: '回复失败', interrupted: '回复已中断' };
 const sourceLabels: Record<SourceType, string> = { metadata: '元数据', abstract: '摘要', fulltext: '全文' };
-const modeLabels: Record<ChatMode, string> = { auto: '自动理解', research: '补充检索', ask: '只问已有资料', pause: '暂停', resume: '继续', cancel: '停止' };
-const modeDescriptions: Record<string, string> = { auto: '根据对话理解问题、澄清或调研', research: '明确请求检索；终态后开启新运行并保留历史', ask: '根据已保存来源回答，不发起新检索' };
+const modeLabels: Record<ChatMode, string> = { auto: '自动理解', research: '补充检索', ask: '只问已有资料' };
+const modeDescriptions: Record<ChatMode, string> = { auto: '根据对话理解问题、澄清或调研', research: '明确请求检索和阅读论文', ask: '根据已保存来源回答，不发起新检索' };
 const intentModes: ChatMode[] = ['auto', 'research', 'ask'];
 const examples = [
   { title: '多智能体协作', icon: 'network' as const, text: '帮我梳理多智能体通信的研究方向，先看看有哪些值得关注的问题。' },
@@ -473,7 +445,11 @@ const healthError = ref('');
 const modelConfigured = computed(() => conversation.value?.model_configured ?? healthConfigured.value);
 interface ArtifactData { papers: Paper[]; report: Report | null; reportNotice: string; loaded: boolean; }
 const artifacts = reactive<Record<string, ArtifactData>>({});
-const artifact = computed(() => artifacts[selectedRunId.value]);
+// 从某轮回复打开报告时固定该轮的报告版本；切换运行或关闭面板后回到最新报告。
+const pinnedReport = ref<{ runId: string; reportId: string } | null>(null);
+const reportKey = computed(() => pinnedReport.value?.runId === selectedRunId.value ? pinnedReport.value.reportId : '');
+const artifactKey = computed(() => `${selectedRunId.value}|${reportKey.value}`);
+const artifact = computed(() => artifacts[artifactKey.value]);
 const artifactLoading = ref(false);
 const artifactError = ref('');
 const paperSelection = ref<{ runId: string; paperId: string; evidenceId?: string } | null>(null);
@@ -481,14 +457,34 @@ const paperDetail = ref<PaperDetail | null>(null);
 const selectedCitation = ref<ChatCitation | null>(null);
 const paperLoading = ref(false);
 const paperError = ref('');
-interface RunProcess { open: boolean; loaded: boolean; loading: boolean; error: string; events: RunEvent[]; }
-const EMPTY_PROCESS: RunProcess = { open: false, loaded: false, loading: false, error: '', events: [] };
-// 每个研究运行各自保存展开状态与已读记录；轮询刷新不改变读者已展开的轮次。
-const runProcess = reactive<Record<string, RunProcess>>({});
+type LogItem = { kind: 'event'; id: string; event: RunEvent } | { kind: 'reader'; id: string; paperId: string; events: RunEvent[] };
+// final 表示读取时该轮已结束，记录不会再增加，展开时不再重复请求。
+interface TurnProcess { open: boolean; loaded: boolean; loading: boolean; final: boolean; error: string; items: LogItem[]; }
+const EMPTY_PROCESS: TurnProcess = { open: false, loaded: false, loading: false, final: false, error: '', items: [] };
+// 每条助手回复各自保存展开状态与已读记录；轮询刷新不改变读者已展开的回复。
+const processes = reactive<Record<string, TurnProcess>>({});
 // 渲染期只读取，不在这里创建条目，避免在 patch 过程中修改响应式状态。
-function processState(runId: string): RunProcess { return runProcess[runId] || EMPTY_PROCESS; }
-function writableProcess(runId: string): RunProcess {
-  return runProcess[runId] || (runProcess[runId] = { open: false, loaded: false, loading: false, error: '', events: [] });
+function processState(messageId: string): TurnProcess { return processes[messageId] || EMPTY_PROCESS; }
+function writableProcess(messageId: string): TurnProcess {
+  return processes[messageId] || (processes[messageId] = { ...EMPTY_PROCESS, items: [] });
+}
+// 阅读子 agent 的记录按论文归组；同一篇论文再次委派时另起一组。
+function logItems(events: RunEvent[]): LogItem[] {
+  const items: LogItem[] = [];
+  const open = new Map<string, { kind: 'reader'; id: string; paperId: string; events: RunEvent[] }>();
+  for (const event of events) {
+    const paperId = event.actor?.startsWith('reader:') ? event.actor.slice('reader:'.length) : '';
+    if (!paperId) { items.push({ kind: 'event', id: event.id, event }); continue; }
+    let group = open.get(paperId);
+    if (!group) {
+      group = { kind: 'reader', id: event.id, paperId, events: [] };
+      open.set(paperId, group);
+      items.push(group);
+    }
+    group.events.push(event);
+    if (event.category === 'reader' && group.events.length > 1) open.delete(paperId);
+  }
+  return items;
 }
 const downloadBusy = ref(false);
 const downloadError = ref('');
@@ -514,7 +510,7 @@ const pageController = new AbortController();
 const errorText = (error: unknown) => error instanceof Error ? error.message : '未知错误，请查看服务端记录';
 const formatTime = (value: string) => new Date(value).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-const tokenText = (value: number | null) => value == null ? '未知' : value.toLocaleString();
+const clockTime = (value: string) => new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 watch(panelOpen, open => {
   if (open) panelReturnFocus = document.activeElement as HTMLElement;
 });
@@ -578,7 +574,7 @@ function handleOverlayKey(event: KeyboardEvent) {
     first.focus();
   }
 }
-function runNumber(id: string) { return [...sortedRuns.value].reverse().findIndex(run => run.id === id) + 1; }
+function runNumber(id: string) { return legacyOrder.value.indexOf(id) + 1; }
 function trackScroll() { const element = timelineElement.value; if (element) nearBottom.value = element.scrollHeight - element.scrollTop - element.clientHeight < 110; }
 function scrollToBottom() { const element = timelineElement.value; if (element) { element.scrollTop = element.scrollHeight; nearBottom.value = true; } }
 async function scrollIfNeeded(shouldScroll: boolean, previousHeight: number | undefined) {
@@ -614,11 +610,11 @@ function applyConversation(data: ConversationView, shouldScroll: boolean) {
 function stopPolling() { pollVersion++; if (pollTimer !== null) clearTimeout(pollTimer); pollTimer = null; pollController?.abort(); pollController = null; }
 function abortMaterials() { artifactVersion++; artifactController?.abort(); artifactLoading.value = false; abortProcesses(); downloadController?.abort(); downloadBusy.value = false; clearPaper(); }
 function abortProcesses() {
-  for (const [runId, controller] of processControllers) { processVersions.set(runId, (processVersions.get(runId) || 0) + 1); controller.abort(); }
+  for (const [messageId, controller] of processControllers) { processVersions.set(messageId, (processVersions.get(messageId) || 0) + 1); controller.abort(); }
   processControllers.clear();
-  for (const state of Object.values(runProcess)) state.loading = false;
+  for (const state of Object.values(processes)) state.loading = false;
 }
-function beginView() { closeMenus(); viewVersion++; stopPolling(); sendController?.abort(); stopController?.abort(); stopBusy.value = false; abortMaterials(); conversationLoading.value = false; conversationError.value = ''; artifactError.value = ''; downloadError.value = ''; for (const key of Object.keys(runProcess)) delete runProcess[key]; panelOpen.value = false; sidebarOpen.value = false; }
+function beginView() { closeMenus(); viewVersion++; stopPolling(); sendController?.abort(); stopController?.abort(); stopBusy.value = false; abortMaterials(); conversationLoading.value = false; conversationError.value = ''; artifactError.value = ''; downloadError.value = ''; for (const key of Object.keys(processes)) delete processes[key]; pinnedReport.value = null; panelOpen.value = false; sidebarOpen.value = false; }
 function newConversation() { historyQuery.value = ''; beginView(); selectedKey.value = NEW_CHAT; nearBottom.value = true; void nextTick(() => { scrollToBottom(); inputElement.value?.focus(); }); }
 function selectConversation(taskId: string, acknowledged?: ConversationView) {
   const fromSidebar = compactLayout.value && sidebarOpen.value;
@@ -626,7 +622,7 @@ function selectConversation(taskId: string, acknowledged?: ConversationView) {
   if (acknowledged) { applyConversation(acknowledged, true); schedulePolling(); } else void pollConversation();
   void nextTick(() => { scrollToBottom(); if (fromSidebar && selectedKey.value === taskId) inputElement.value?.focus(); });
 }
-function schedulePolling() { const data = conversation.value; if (!data || disposed || stopBusy.value || currentPending.value?.busy || conversationError.value) return; if (data.busy || data.runs.some(run => running.has(run.status))) { const version = pollVersion; if (pollTimer !== null) clearTimeout(pollTimer); pollTimer = setTimeout(() => { pollTimer = null; if (version === pollVersion) void pollConversation(); }, 1400); } }
+function schedulePolling() { const data = conversation.value; if (!data || disposed || stopBusy.value || currentPending.value?.busy || conversationError.value) return; if (data.busy) { const version = pollVersion; if (pollTimer !== null) clearTimeout(pollTimer); pollTimer = setTimeout(() => { pollTimer = null; if (version === pollVersion) void pollConversation(); }, 1400); } }
 async function pollConversation() {
   const key = selectedKey.value; if (key === NEW_CHAT || stopBusy.value || currentPending.value?.busy || pollController) return;
   const version = viewVersion; const cycle = pollVersion; const write = writeVersions[key] || 0;
@@ -665,11 +661,6 @@ async function sendDraft() {
   if (Array.from(content).length > inputLimit.value) { sendErrors[key] = `消息不能超过 ${inputLimit.value} 字符。`; return; }
   pending[key] = { request_id: crypto.randomUUID(), content, mode: currentMode.value, snapshot: draft.value, fromDraft: true, busy: false, error: '' }; await transmit(key);
 }
-async function sendControl(mode: 'pause' | 'resume' | 'cancel') {
-  if (controlsDisabled.value || !conversation.value) return; const key = selectedKey.value;
-  const content = { pause: '暂停当前调研', resume: '继续当前调研', cancel: '停止当前调研' }[mode];
-  pending[key] = { request_id: crypto.randomUUID(), content, mode, snapshot: '', fromDraft: false, busy: false, error: '' }; await transmit(key);
-}
 async function stopWork() {
   const key = selectedKey.value;
   if (!conversation.value || currentPending.value || stopBusy.value) return;
@@ -677,7 +668,7 @@ async function stopWork() {
   const write = (writeVersions[key] || 0) + 1; writeVersions[key] = write;
   const controller = new AbortController(); stopController = controller; stopBusy.value = true; sendErrors[key] = '';
   const active = () => !disposed && view === viewVersion && key === selectedKey.value && write === writeVersions[key] && !controller.signal.aborted;
-  try { const data = await stopConversation(key, controller.signal); if (active()) { applyConversation(data, nearBottom.value); conversationError.value = ''; if (panelOpen.value) void loadArtifacts(); } }
+  try { const data = await stopConversation(key, controller.signal); if (active()) { applyConversation(data, nearBottom.value); conversationError.value = ''; if (panelOpen.value) void loadArtifacts(); void refreshOpenProcesses(); } }
   catch (error) { if (active()) sendErrors[key] = `停止请求未确认：${errorText(error)}。已有消息与草稿保留，可重新停止。`; }
   finally { if (active()) { stopBusy.value = false; stopController = null; schedulePolling(); } }
 }
@@ -786,27 +777,32 @@ async function copyMessage(content: string) {
   catch { setNotice('无法访问剪贴板，请选择回复文本后复制', true); }
 }
 function clearPaper() { paperVersion++; paperController?.abort(); paperSelection.value = null; paperDetail.value = null; selectedCitation.value = null; paperError.value = ''; paperLoading.value = false; }
-function closePanel() { panelOpen.value = false; artifactVersion++; artifactController?.abort(); artifactLoading.value = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); void nextTick(() => panelReturnFocus?.focus()); }
+function closePanel() { panelOpen.value = false; pinnedReport.value = null; artifactVersion++; artifactController?.abort(); artifactLoading.value = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); void nextTick(() => panelReturnFocus?.focus()); }
 function togglePanel() { if (panelOpen.value) closePanel(); else { if (!selectedRuns[selectedKey.value] && latestRun.value) selectedRuns[selectedKey.value] = latestRun.value.id; panelOpen.value = true; void loadArtifacts(); } }
-function chooseRun(runId: string) { selectedRuns[selectedKey.value] = runId; if (runMenu.value) runMenu.value.open = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); artifactError.value = ''; downloadError.value = ''; void loadArtifacts(); }
+function chooseRun(runId: string) { selectedRuns[selectedKey.value] = runId; pinnedReport.value = null; if (runMenu.value) runMenu.value.open = false; downloadController?.abort(); downloadBusy.value = false; clearPaper(); artifactError.value = ''; downloadError.value = ''; void loadArtifacts(); }
 function openRun(runId: string) { panelOpen.value = true; panelTab.value = 'papers'; chooseRun(runId); }
+function openReport(work: AgentWork) {
+  selectedRuns[selectedKey.value] = work.run_id; pinnedReport.value = { runId: work.run_id, reportId: work.report_id! };
+  downloadController?.abort(); downloadBusy.value = false; clearPaper(); artifactError.value = ''; downloadError.value = '';
+  panelOpen.value = true; panelTab.value = 'report'; void loadArtifacts();
+}
 function openPaper(paperId: string, evidenceId?: string) { clearPaper(); panelTab.value = 'papers'; paperSelection.value = { runId: selectedRunId.value, paperId, evidenceId }; void loadPaper(); }
 function openReportEvidence(id: string) { const evidence = artifact.value?.report?.document?.evidence.find(item => item.id === id); if (evidence) openPaper(evidence.paper_id, id); }
-function openCitation(citation: ChatCitation) { downloadController?.abort(); downloadBusy.value = false; downloadError.value = ''; panelOpen.value = true; panelTab.value = 'papers'; selectedRuns[selectedKey.value] = citation.run_id; clearPaper(); selectedCitation.value = citation; paperSelection.value = { runId: citation.run_id, paperId: citation.paper_id }; void loadArtifacts(); void loadPaper(); }
+function openCitation(citation: ChatCitation) { downloadController?.abort(); downloadBusy.value = false; downloadError.value = ''; panelOpen.value = true; panelTab.value = 'papers'; selectedRuns[selectedKey.value] = citation.run_id; pinnedReport.value = null; clearPaper(); selectedCitation.value = citation; paperSelection.value = { runId: citation.run_id, paperId: citation.paper_id }; void loadArtifacts(); void loadPaper(); }
 async function loadArtifacts() {
   if (!panelOpen.value || !selectedRunId.value) return;
   artifactController?.abort(); const controller = new AbortController(); artifactController = controller;
-  const version = ++artifactVersion; const view = viewVersion; const runId = selectedRunId.value;
-  const active = () => !disposed && view === viewVersion && version === artifactVersion && panelOpen.value && runId === selectedRunId.value && !controller.signal.aborted;
-  artifactLoading.value = !artifacts[runId]?.loaded;
+  const version = ++artifactVersion; const view = viewVersion; const runId = selectedRunId.value; const reportId = reportKey.value || null; const key = artifactKey.value; const run = selectedRun.value;
+  const active = () => !disposed && view === viewVersion && version === artifactVersion && panelOpen.value && key === artifactKey.value && !controller.signal.aborted;
+  artifactLoading.value = !artifacts[key]?.loaded;
   try {
-    const [paperResult, reportResult] = await Promise.allSettled([getPapers(runId, controller.signal), getReport(runId, controller.signal)]); if (!active()) return;
-    const data = artifacts[runId] || { papers: [], report: null, reportNotice: '', loaded: false }; const errors: string[] = [];
+    const [paperResult, reportResult] = await Promise.allSettled([getPapers(runId, controller.signal), getReport(runId, reportId, controller.signal)]); if (!active()) return;
+    const data = artifacts[key] || { papers: [], report: null, reportNotice: '', loaded: false }; const errors: string[] = [];
     if (paperResult.status === 'fulfilled') { data.papers = paperResult.value; data.loaded = true; } else errors.push(`读取文献失败：${errorText(paperResult.reason)}`);
     if (reportResult.status === 'fulfilled') data.report = reportResult.value;
-    else if (reportResult.reason instanceof ApiError && reportResult.reason.status === 409) { data.report = null; data.reportNotice = `本次运行尚无可交付报告（${selectedRun.value ? runLabels[selectedRun.value.status] : '当前状态未知'}）。`; }
+    else if (reportResult.reason instanceof ApiError && reportResult.reason.status === 409) { data.report = null; data.reportNotice = run?.agent ? '本对话还没有报告。' : `本次运行尚无可交付报告（${run ? runLabels[run.status] : '当前状态未知'}）。`; }
     else errors.push(`读取报告失败：${errorText(reportResult.reason)}`);
-    artifacts[runId] = data; artifactError.value = errors.join('；');
+    artifacts[key] = data; artifactError.value = errors.join('；');
   } finally { if (active()) artifactLoading.value = false; }
 }
 async function loadPaper() {
@@ -827,37 +823,40 @@ async function loadPaper() {
   catch (error) { if (active()) paperError.value = `读取论文详情失败：${errorText(error)}`; }
   finally { if (active()) paperLoading.value = false; }
 }
-function onProcessToggle(runId: string, event: Event) {
-  const state = writableProcess(runId);
+function onProcessToggle(messageId: string, event: Event) {
+  const state = writableProcess(messageId);
   state.open = (event.target as HTMLDetailsElement).open;
-  if (state.open) void loadProcess(runId);
-  else { processVersions.set(runId, (processVersions.get(runId) || 0) + 1); processControllers.get(runId)?.abort(); processControllers.delete(runId); state.loading = false; }
+  if (state.open) { if (!state.final) void loadProcess(messageId); }
+  else { processVersions.set(messageId, (processVersions.get(messageId) || 0) + 1); processControllers.get(messageId)?.abort(); processControllers.delete(messageId); state.loading = false; }
 }
-// 轮询后照常刷新已展开的记录（沿用原行为），但不改变折叠状态。已读过一次的记录在后台刷新时
+// 轮询后刷新已展开且仍在进行的记录，不改变折叠状态。已读过一次的记录在后台刷新时
 // 不显示占位段落，因此不会改变时间线高度或读者的滚动位置。
 async function refreshOpenProcesses() {
-  await Promise.all(Object.keys(runProcess).filter(runId => runProcess[runId].open).map(runId => loadProcess(runId)));
+  await Promise.all(Object.keys(processes).filter(id => processes[id].open && !processes[id].final).map(id => loadProcess(id)));
 }
-async function loadProcess(runId: string) {
-  const state = writableProcess(runId);
-  if (!state.open) return;
-  processControllers.get(runId)?.abort();
-  const controller = new AbortController(); processControllers.set(runId, controller);
-  const version = (processVersions.get(runId) || 0) + 1; processVersions.set(runId, version);
+async function loadProcess(messageId: string) {
+  const state = writableProcess(messageId);
+  // 执行中连发消息并入时，尚未开始的回复会失去工作记录。
+  const message = conversation.value?.messages.find(item => item.id === messageId);
+  if (!state.open || !message?.work) return;
+  const runId = message.work.run_id; const final = !['queued', 'processing'].includes(message.status);
+  processControllers.get(messageId)?.abort();
+  const controller = new AbortController(); processControllers.set(messageId, controller);
+  const version = (processVersions.get(messageId) || 0) + 1; processVersions.set(messageId, version);
   const view = viewVersion;
-  const active = () => !disposed && view === viewVersion && version === processVersions.get(runId) && !controller.signal.aborted;
+  const active = () => !disposed && view === viewVersion && version === processVersions.get(messageId) && !controller.signal.aborted;
   state.loading = !state.loaded;
   try {
-    const data = await getRunEvents(runId, controller.signal);
+    const data = await getRunEvents(runId, messageId, controller.signal);
     if (active()) {
       const previousHeight = timelineElement.value?.scrollHeight;
       const shouldScroll = nearBottom.value;
-      state.events = data; state.loaded = true; state.error = ''; state.loading = false;
+      state.items = logItems(data); state.loaded = true; state.final = final; state.error = ''; state.loading = false;
       void scrollIfNeeded(shouldScroll, previousHeight);
     }
   }
   catch (error) { if (active()) state.error = `读取过程失败：${errorText(error)}`; }
-  finally { if (active()) { state.loading = false; if (processControllers.get(runId) === controller) processControllers.delete(runId); } }
+  finally { if (active()) { state.loading = false; if (processControllers.get(messageId) === controller) processControllers.delete(messageId); } }
 }
 async function downloadReport(format: 'md' | 'docx' | 'pdf') {
   if (downloadBusy.value || !selectedRunId.value || !artifact.value?.report) return;
@@ -875,12 +874,13 @@ onMounted(() => {
   document.addEventListener('keydown', handleOverlayKey);
   void refreshHistory();
   void loadModelSettings();
+  clockTimer = setInterval(() => { if (conversation.value?.messages.some(message => message.status === 'processing' && message.work)) clock.value = Date.now(); }, 1000);
 });
 onUnmounted(() => {
   window.removeEventListener('resize', resizeInput);
   compactQuery.removeEventListener('change', onLayoutChange);
   document.removeEventListener('keydown', handleOverlayKey);
-  disposed = true; window.clearTimeout(noticeTimer); window.clearTimeout(historyQueryTimer); stopPolling(); abortMaterials(); sendController?.abort(); stopController?.abort(); historyController?.abort(); pageController.abort();
+  disposed = true; if (clockTimer !== null) clearInterval(clockTimer); window.clearTimeout(noticeTimer); window.clearTimeout(historyQueryTimer); stopPolling(); abortMaterials(); sendController?.abort(); stopController?.abort(); historyController?.abort(); pageController.abort();
 });
 </script>
 <style src="./workspace.css"></style>

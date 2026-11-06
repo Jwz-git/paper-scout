@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.storage.conversations import ConversationStore
-from backend.app.domain.conversation import DialogueDecision
 
 
 def provider(name='供应商 A', model='offline-a', key='artificial-key-a'):
@@ -15,12 +14,12 @@ def provider(name='供应商 A', model='offline-a', key='artificial-key-a'):
 
 
 def test_rename_does_not_change_research_scope(client):
-    task = client.post('/api/tasks', json={'topic': 'original question'}).json()
-    run = client.post(f"/api/tasks/{task['id']}/runs").json()
+    task = client.post('/api/conversations', json={'content': 'original question', 'request_id': 'rename'}).json()['task']
+    run = client.app.state.db.agent_run(task['id'])
     renamed = client.post(f"/api/conversations/{task['id']}/rename", json={'title': ' New label '})
     assert renamed.status_code == 200
     assert renamed.json()['title'] == 'New label' and renamed.json()['topic'] == 'original question'
-    assert client.get(f"/api/runs/{run['id']}").json()['initial_topic'] == 'original question'
+    assert client.get(f"/api/runs/{run.id}").json()['initial_topic'] == 'original question'
     assert client.get('/api/conversations').json()[0]['title'] == 'New label'
     assert client.post(f"/api/conversations/{task['id']}/rename", json={'title': ' '}).status_code == 422
 
@@ -45,26 +44,13 @@ def test_trash_stops_work_hides_history_and_restore_keeps_messages(client):
     assert client.post('/api/conversations', json=payload).json()['task']['id'] == tid
 
 
-def test_trashed_run_cannot_be_resumed_and_retains_usage(client):
-    task = client.post('/api/tasks', json={'topic': 'offline'}).json()
-    run = client.post(f"/api/tasks/{task['id']}/runs").json()
-    db = client.app.state.db
-    current = db.get_run(run['id']); current.total_calls = 4; db.update_run(current)
-    client.post(f"/api/conversations/{task['id']}/trash")
-    assert db.get_run(run['id']).status.value == 'cancelled'
-    assert client.post(f"/api/runs/{run['id']}/resume").status_code == 404
-    client.post(f"/api/conversations/{task['id']}/restore")
-    view = client.get(f"/api/conversations/{task['id']}").json()
-    assert view['runs'][0]['total_calls'] == 4 and view['runs'][0]['status'] == 'cancelled'
-
-
-def test_late_dialogue_result_cannot_resurrect_trashed_conversation(client):
+def test_late_result_cannot_resurrect_trashed_conversation(client):
     result = client.post('/api/conversations', json={'content': 'offline', 'request_id': 'late'}).json()
     store = ConversationStore(client.app.state.db)
     turn = store.next_turn(); store.claim(turn)
     tid = result['task']['id']
     client.post(f'/api/conversations/{tid}/trash')
-    store.finish(turn, DialogueDecision(action='clarify', content='late result must not replace stopped message'))
+    store.finish(turn, content='late result must not replace stopped message')
     assert 'late result' not in store.messages(tid)[-1].content
     assert not client.get('/api/conversations').json()
 
@@ -80,35 +66,34 @@ def test_providers_share_one_key_across_models_and_delete_does_not_switch(client
     assert 'artificial-key-a' not in public.text and 'artificial-key-b' not in public.text
     assert len(public.json()['providers']) == 2 and public.json()['active_provider_id'] == aid
     assert client.post('/api/settings/selection', json={'provider_id': aid, 'model': 'a-2'}).status_code == 200
-    assert client.app.state.engine.llm.model == 'a-2'
+    assert client.app.state.agent.llm.model == 'a-2'
     assert client.post('/api/settings/selection', json={'provider_id': bid, 'model': 'b'}).status_code == 200
-    assert client.app.state.engine.llm._api_key == 'artificial-key-b'
+    assert client.app.state.agent.llm._api_key == 'artificial-key-b'
     updated = {**provider('供应商 B 改名', 'b', None), 'models': ['b', 'b-2']}
     assert client.post(f'/api/settings/providers/{bid}', json=updated).status_code == 200
-    assert client.app.state.engine.llm._api_key == 'artificial-key-b'
+    assert client.app.state.agent.llm._api_key == 'artificial-key-b'
     assert client.post('/api/settings/selection', json={'provider_id': bid, 'model': 'foreign'}).status_code == 422
     deleted = client.post(f'/api/settings/providers/{bid}/delete').json()
     assert not deleted['enabled'] and deleted['active_provider_id'] is None
     assert any(p['id'] == aid for p in deleted['providers'])
-    assert client.app.state.engine.llm is None
+    assert client.app.state.agent.llm is None
 
 
 def test_inactive_provider_can_be_saved_during_work_but_current_cannot(client):
     a = client.post('/api/settings/providers', json=provider()).json()['provider_id']
     client.post('/api/settings/selection', json={'provider_id': a, 'model': 'offline-a'})
-    adapter = client.app.state.engine.llm
-    task = client.post('/api/tasks', json={'topic': 'offline'}).json()
-    run = client.post(f"/api/tasks/{task['id']}/runs").json()
+    adapter = client.app.state.agent.llm
+    task = client.post('/api/conversations', json={'content': 'offline', 'request_id': 'busy'}).json()['task']
     b = client.post('/api/settings/providers', json=provider('供应商 B', 'offline-b', None))
     assert b.status_code == 200
     bid = b.json()['provider_id']
-    assert client.app.state.engine.llm is adapter
+    assert client.app.state.agent.llm is adapter
     assert client.post('/api/settings/selection', json={'provider_id': bid, 'model': 'offline-b'}).status_code == 409
     assert client.post(f'/api/settings/providers/{a}', json=provider()).status_code == 409
     assert client.post(f'/api/settings/providers/{a}/delete').status_code == 409
-    client.post(f"/api/runs/{run['id']}/pause")
+    client.post(f"/api/conversations/{task['id']}/stop")
     assert client.post('/api/settings/selection', json={'provider_id': bid, 'model': 'offline-b'}).status_code == 200
-    assert client.app.state.engine.llm._api_key == ''
+    assert client.app.state.agent.llm._api_key == ''
 
 
 def test_legacy_single_model_is_preserved_until_next_save(tmp_path):
@@ -126,7 +111,7 @@ def test_legacy_single_model_is_preserved_until_next_save(tmp_path):
         assert 'profiles' not in saved
     with TestClient(create_app(config=cfg, run_worker=False)) as client:
         assert len(client.get('/api/settings').json()['providers']) == 2
-        assert client.app.state.engine.llm.model == 'legacy-model'
+        assert client.app.state.agent.llm.model == 'legacy-model'
 
 
 def test_provider_address_change_and_validation_never_echo_keys(client):

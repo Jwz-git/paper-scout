@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from uuid import uuid4
 
 from backend.app.config import settings
 from backend.app.domain.models import (
@@ -13,7 +14,6 @@ from backend.app.domain.models import (
     Paper,
     Report,
     Run,
-    RunMessage,
     RunStage,
     RunStatus,
     SourceText,
@@ -351,9 +351,6 @@ class Database:
     # --- Run 与状态操作（只在短事务内执行，不跨网络请求） ---
     def create_run(self, run: Run) -> None:
         with self._get_connection() as conn:
-            active = conn.execute("SELECT id FROM runs WHERE task_id=? AND status IN ('queued','running','pause_requested','paused','needs_input')", (run.task_id,)).fetchone()
-            if active:
-                raise StateConflict("该任务已有活动运行")
             if run.initial_input is None:
                 task = self.get_task(run.task_id)
                 if task is None:
@@ -396,95 +393,55 @@ class Database:
 
     def update_run(self, run: Run) -> None:
         with self._get_connection() as conn:
-            # API 控制请求可能发生在外部 await 中；旧 worker 快照不能覆盖暂停／取消。
-            row = conn.execute("SELECT status,stop_reason,ended_at FROM runs WHERE id=?", (run.id,)).fetchone()
-            if row is None:
-                raise ValueError("运行不存在")
-            if row["status"] == "cancelled":
-                run.status = RunStatus.CANCELLED
-                run.stop_reason = row["stop_reason"]
-                run.ended_at = datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
-            elif row["status"] == "pause_requested" and run.status not in (RunStatus.PAUSED,RunStatus.INTERRUPTED,RunStatus.FAILED):
-                run.status = RunStatus.PAUSE_REQUESTED
             conn.execute("UPDATE runs SET status=?,stage=?,current_round=?,max_rounds=?,max_calls=?,total_calls=?,total_execution_seconds=?,stop_reason=?,started_at=?,ended_at=?,details=? WHERE id=?", (run.status.value,run.stage.value,run.current_round,run.max_rounds,run.max_calls,run.total_calls,run.total_execution_seconds,run.stop_reason,run.started_at.isoformat() if run.started_at else None,run.ended_at.isoformat() if run.ended_at else None,run.model_dump_json(),run.id))
-            self.record_conversation_run(run)
-
-    def pause_run(self, run_id, dialogue=False):
-        with self._get_connection() as conn:
-            if not dialogue:
-                conn.execute("UPDATE conversation_turns SET paused_by_dialogue=0 WHERE run_id=? AND status IN ('queued','processing')", (run_id,))
-            run = self.get_run(run_id)
-            if run is None:
-                raise ValueError("运行不存在")
-            if run.status in (RunStatus.PAUSED, RunStatus.PAUSE_REQUESTED):
-                return run
-            if run.status == RunStatus.QUEUED:
-                return self.transition(run_id,[RunStatus.QUEUED],RunStatus.PAUSED)
-            return self.transition(run_id,[RunStatus.RUNNING],RunStatus.PAUSE_REQUESTED)
-
-    def cancel_run(self, run_id):
-        with self._get_connection() as conn:
-            run = self.get_run(run_id)
-            if run is None:
-                raise ValueError("运行不存在")
-            if run.status == RunStatus.CANCELLED:
-                return run
-            conn.execute("UPDATE runs SET stop_reason='用户取消',ended_at=? WHERE id=?", (utc_now().isoformat(),run_id))
-            self.transition(run_id,[RunStatus.QUEUED,RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED,RunStatus.PAUSED,RunStatus.NEEDS_INPUT],RunStatus.CANCELLED)
-            return self.get_run(run_id)
-
-    def add_message_if_paused(self, msg):
-        with self._get_connection():
-            run = self.get_run(msg.run_id)
-            if run is None or run.status not in (RunStatus.PAUSED,RunStatus.NEEDS_INPUT):
-                raise StateConflict("只能在暂停或等待补充时添加信息")
-            self.save_run_message(msg)
-
-    def transition(self, run_id, expected, target):
-        with self._get_connection() as conn:
-            placeholders = ",".join("?" for _ in expected)
-            changed = conn.execute(f"UPDATE runs SET status=? WHERE id=? AND status IN ({placeholders})", [target.value,run_id,*[s.value for s in expected]]).rowcount
-            if not changed:
-                raise StateConflict("当前运行状态不允许此操作")
-            run = self.get_run(run_id)
-            self.record_conversation_run(run)
-            return run
 
     def interrupt_running(self):
         with self._get_connection() as conn:
-            interrupted = [r.id for r in self.list_runs() if r.status in (RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED)]
-            conn.execute("UPDATE runs SET status='interrupted',stop_reason='执行进程中断；不会自动重复外部调用',ended_at=? WHERE status IN ('running','pause_requested')", (utc_now().isoformat(),))
-            for run_id in interrupted:
+            now = utc_now().isoformat()
+            runs = self.list_runs()
+            interrupted = [r.id for r in runs if r.status in (RunStatus.RUNNING,RunStatus.PAUSE_REQUESTED)]
+            conn.execute("UPDATE runs SET status='interrupted',stop_reason='执行进程中断；不会自动重复外部调用',ended_at=? WHERE status IN ('running','pause_requested')", (now,))
+            # 旧流水线已移除，暂停、排队或等待补充的旧运行无法再继续；资料保留可查看。
+            legacy = [r.id for r in runs if not r.agent and r.status in (RunStatus.QUEUED,RunStatus.PAUSED,RunStatus.NEEDS_INPUT)]
+            for run_id in legacy:
+                conn.execute("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=? WHERE id=?",
+                             ("研究流程已改为对话 agent，旧运行不再继续；已保存的资料仍可查看", now, run_id))
+            for run_id in interrupted + legacy:
                 self.record_conversation_run(self.get_run(run_id))
 
-    def save_run_message(self, msg: RunMessage) -> None:
+    def agent_run(self, task_id):
+        """对话的 agent 工作区；首次使用时创建。"""
         with self._get_connection() as conn:
-            conn.execute("INSERT INTO run_messages(id,run_id,content,status,impact_summary,created_at,proposed_scope) VALUES(?,?,?,?,?,?,?)", (msg.id,msg.run_id,msg.content,msg.status,msg.impact_summary,msg.created_at.isoformat(),msg.proposed_scope.model_dump_json() if msg.proposed_scope else None))
-
-    def list_run_messages(self, run_id: str) -> List[RunMessage]:
-        with self._get_connection() as conn:
-            messages = []
-            for row in conn.execute("SELECT * FROM run_messages WHERE run_id=? ORDER BY created_at,id", (run_id,)):
-                data = dict(row)
-                data["proposed_scope"] = json.loads(data["proposed_scope"]) if data["proposed_scope"] else None
-                messages.append(RunMessage.model_validate(data))
-            return messages
-
-    def apply_plan(self, run, messages, keep_paper_ids=None):
-        with self._get_connection() as conn:
-            if keep_paper_ids is not None:
-                self.select_papers(run.id,keep_paper_ids)
+            existing = next((r for r in self.list_runs(task_id=task_id) if r.agent), None)
+            if existing is not None:
+                return existing
+            task = self.get_task(task_id)
+            run = Run(id="run_"+uuid4().hex, task_id=task_id, initial_topic=task.topic, agent=True, status=RunStatus.COMPLETED)
+            conn.execute("INSERT INTO runs(id,task_id,initial_topic,status,stage,created_at,details) VALUES(?,?,?,?,?,?,?)",
+                         (run.id,run.task_id,run.initial_topic,run.status.value,run.stage.value,run.created_at.isoformat(),run.model_dump_json()))
+            # 同一对话旧运行纳入的论文作为候选、已取得的原文作为可读快照带入，不重复下载。
+            conn.execute("INSERT OR IGNORE INTO run_papers(run_id,paper_id,is_selected,snapshot) SELECT ?,paper_id,0,snapshot FROM run_papers WHERE is_selected=1 AND run_id IN (SELECT id FROM runs WHERE task_id=? AND id<>?)", (run.id,task_id,run.id))
+            conn.execute("INSERT OR IGNORE INTO run_sources SELECT ?,source_text_id FROM run_sources WHERE run_id IN (SELECT id FROM runs WHERE task_id=? AND id<>?)", (run.id,task_id,run.id))
             self.update_run(run)
-            for msg in messages:
-                conn.execute("UPDATE run_messages SET status='processed',impact_summary=? WHERE id=?", ("已重新规划并重新确定历史文献的纳入范围",msg.id))
+            return run
 
-    def save_papers(self, papers: List[Paper], run_id: Optional[str] = None) -> None:
+    def run_evidence(self, run_id):
+        with self._get_connection() as conn:
+            return [Evidence.model_validate(dict(r)) for r in conn.execute(
+                "SELECT e.* FROM evidence e JOIN run_sources rs ON rs.source_text_id=e.source_text_id AND rs.run_id=? ORDER BY e.rowid", (run_id,))]
+
+    def run_source_texts(self, run_id):
+        with self._get_connection() as conn:
+            return [SourceText.model_validate(dict(r)) for r in conn.execute(
+                "SELECT s.* FROM source_texts s JOIN run_sources rs ON rs.source_text_id=s.id AND rs.run_id=? ORDER BY s.rowid", (run_id,))]
+
+    def save_papers(self, papers: List[Paper], run_id: Optional[str] = None, selected=True) -> None:
         with self._get_connection() as conn:
             for p in papers:
                 # 首次元数据不被下一次检索覆盖；各运行另外保存取得的独立快照。
                 conn.execute("INSERT OR IGNORE INTO papers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (p.id,p.title,json.dumps(p.authors),p.year,p.doi,p.source,p.source_id,p.url,p.pdf_url,p.abstract,p.primary_category,json.dumps(p.categories),p.fetched_at.isoformat()))
                 if run_id:
-                    conn.execute("INSERT OR IGNORE INTO run_papers(run_id,paper_id,is_selected,snapshot) VALUES(?,?,1,?)", (run_id,p.id,p.model_dump_json()))
+                    conn.execute("INSERT OR IGNORE INTO run_papers(run_id,paper_id,is_selected,snapshot) VALUES(?,?,?,?)", (run_id,p.id,int(selected),p.model_dump_json()))
 
     def get_papers_by_run(self, run_id: str, selected_only=False) -> List[Paper]:
         with self._get_connection() as conn:
@@ -501,13 +458,6 @@ class Database:
                     d["authors"], d["categories"] = json.loads(d["authors"] or "[]"), json.loads(d["categories"] or "[]")
                     result.append(Paper.model_validate(d))
             return result
-
-    def select_papers(self, run_id, paper_ids):
-        with self._get_connection() as conn:
-            conn.execute("UPDATE run_papers SET is_selected=0 WHERE run_id=?", (run_id,))
-            for paper_id in paper_ids:
-                if conn.execute("UPDATE run_papers SET is_selected=1 WHERE run_id=? AND paper_id=?", (run_id,paper_id)).rowcount != 1:
-                    raise ValueError("计划引用了未知论文")
 
     def save_source_texts(self, texts: List[SourceText], run_id=None) -> None:
         with self._get_connection() as conn:
@@ -549,7 +499,6 @@ class Database:
     def save_report(self, report: Report) -> None:
         with self._get_connection() as conn:
             conn.execute("INSERT INTO reports(id,run_id,title,content_markdown,gaps,stop_reason,created_at,document) VALUES(?,?,?,?,?,?,?,?)", (report.id,report.run_id,report.title,report.content_markdown,json.dumps(report.gaps,ensure_ascii=False),report.stop_reason,report.created_at.isoformat(),report.document.model_dump_json() if report.document else None))
-            self.record_conversation_run(self.get_run(report.run_id))
 
     def get_report(self, run_id: str, report_id: Optional[str] = None) -> Optional[Report]:
         with self._get_connection() as conn:
@@ -568,9 +517,10 @@ class Database:
         with self._get_connection() as conn:
             conn.execute("INSERT INTO events VALUES(?,?,?)", (event.id,event.run_id,event.model_dump_json()))
 
-    def list_events(self, run_id):
+    def list_events(self, run_id, turn_id=None):
         with self._get_connection() as conn:
-            return [Event.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM events WHERE run_id=? ORDER BY rowid", (run_id,))]
+            events = [Event.model_validate_json(r[0]) for r in conn.execute("SELECT data FROM events WHERE run_id=? ORDER BY rowid", (run_id,))]
+            return events if turn_id is None else [e for e in events if e.turn_id == turn_id]
 
     def save_query(self, query):
         with self._get_connection() as conn:
@@ -604,7 +554,8 @@ class Database:
     def save_selections(self, run_id, selections):
         with self._get_connection() as conn:
             for selection in selections:
-                conn.execute("INSERT INTO paper_selections VALUES(?,?,?,?)", (run_id, selection.paper_id, selection.analysis_revision, selection.model_dump_json()))
+                # agent 可以改变对同一论文的纳入判断，以最后一次为准。
+                conn.execute("INSERT INTO paper_selections VALUES(?,?,?,?) ON CONFLICT(run_id,paper_id,revision) DO UPDATE SET data=excluded.data", (run_id, selection.paper_id, selection.analysis_revision, selection.model_dump_json()))
                 conn.execute("UPDATE run_papers SET is_selected=?,relevance_note=? WHERE run_id=? AND paper_id=?", (int(selection.relevant), selection.reason, run_id, selection.paper_id))
 
     def list_selections(self, run_id, revision):

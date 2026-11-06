@@ -22,10 +22,11 @@ const citation = { source_text_id: source.id, paper_id: paper.id, run_id: 'offli
 const run = { id: 'offline-run', task_id: taskA.id, initial_topic: taskA.topic, initial_input: { topic: taskA.topic, focus_dimensions: [] }, current_input: { topic: taskA.topic, focus_dimensions: [] }, status: 'running', stage: 'searching', current_round: 1, max_rounds: 3, max_calls: 20, max_seconds: 900, total_calls: 2, total_execution_seconds: 3.5, model_calls: 1, token_usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null }, gaps: [], created_at: now };
 const usage = { model_calls: 1, total_execution_seconds: 1.2, token_usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null } };
 const message = (id, taskId, role, content, extra = {}) => ({ id, task_id: taskId, role, content, status: 'completed', citations: [], created_at: now, ...extra });
-let viewA = { task: taskA, messages: [message('a-user', taskA.id, 'user', '人工会话A的原始问题'), message('a-answer', taskA.id, 'assistant', '这条回答引用已保存的人工来源样例，语义支持仍需复核。', { action: 'answer', run_id: run.id, citations: [citation] })], runs: [run], usage, busy: false, model_configured: true };
+let viewA = { task: taskA, messages: [message('a-user', taskA.id, 'user', '人工会话A的原始问题'), message('a-answer', taskA.id, 'assistant', '这条回答引用已保存的人工来源样例，语义支持仍需复核。', { run_id: run.id, citations: [citation] })], runs: [run], usage, busy: false, model_configured: true };
 const viewB = { task: taskB, messages: [message('b-user', taskB.id, 'user', '人工会话B的原始问题')], runs: [], usage, busy: false, model_configured: true };
 const posts = [];
 const creationPosts = [];
+const defaultScenario = !process.env.BROWSER_SCENARIO;
 const controlOnly = process.env.BROWSER_SCENARIO === 'controls';
 const settingsOnly = process.env.BROWSER_SCENARIO === 'settings';
 const basicsOnly = process.env.BROWSER_SCENARIO === 'basics';
@@ -42,7 +43,14 @@ const chatMaterialsReleased = new Promise(resolve => { releaseChatMaterials = re
 const chatEventsStarted = new Promise(resolve => { signalChatEvents = resolve; });
 const chatEventsReleased = new Promise(resolve => { releaseChatEvents = resolve; });
 const externalRequests = [];
+const reportRequests = [];
+const limits = { steps: 30, calls: 150, seconds: 1800, fulltexts: 10, readers: 3, reader_steps: 8 };
+const work = (extra = {}) => ({ run_id: run.id, activity: null, steps: 6, calls: 14, model_calls: 9, seconds: 95, progress_at: now, todos: [], subagents: 0, report_id: null, stop_reason: null, continued: false, limits, ...extra });
+// 执行中默认可发送；忙碌时由服务端把新消息并入当前回合。
+if (defaultScenario) viewA = { ...viewA, busy: true };
 if (chatOnly) {
+  // agent 形态：一轮已完成的回答；下一轮执行中连发两条消息，第一段交接、中间的空回复被并入、最新回复继续工作。
+  viewA = { ...viewA, busy: true, runs: [{ ...run, agent: true, status: 'completed' }] };
   viewA.messages = [
     message('a-user', taskA.id, 'user', '帮我梳理多智能体通信的研究方向，区分已有证据和待验证问题。'),
     message('a-answer', taskA.id, 'assistant', [
@@ -56,8 +64,13 @@ if (chatOnly) {
       '```python\n# Artificial display example\nprint("evidence before conclusions")\n```',
       '[公开来源](https://arxiv.org/)\n\n<img src="https://invalid.example/raw-image" onerror="window.__markdownExecuted=true">\n\n[不安全链接](javascript:alert(1))\n\n![不自动下载图片](https://invalid.example/tracker.png)',
       ...Array.from({ length: 8 }, (_, index) => `### 待核查方向 ${index + 1}\n这里只展示人工长文本，检查滚动阅读时后台刷新是否改变当前位置。实际结论需要逐条关联已保存的来源，缺失字段必须明确标记。`),
-    ].join('\n\n'), { run_id: run.id, citations: [citation] }),
-    message('a-run-summary', taskA.id, 'assistant', '研究 offline-run 状态为 running。', { run_id: run.id }),
+    ].join('\n\n'), { citations: [citation], work: work({ subagents: 2, report_id: 'chat-report' }) }),
+    message('a-follow', taskA.id, 'user', '再看看评价协议。'),
+    message('a-continued', taskA.id, 'assistant', '', { work: work({ steps: 2, calls: 3, model_calls: 2, seconds: 12, continued: true }) }),
+    message('a-merged', taskA.id, 'user', '只看 2023 年以后的。'),
+    message('a-filler', taskA.id, 'assistant', ''),
+    message('a-extra', taskA.id, 'user', '顺便列出数据集。'),
+    message('a-working', taskA.id, 'assistant', '', { status: 'processing', work: work({ steps: 3, calls: 5, model_calls: 3, seconds: 20, progress_at: new Date().toISOString(), activity: '正在检索 arXiv：multi-agent communication', todos: [{ text: '检索 2023 年以后的论文', status: 'done' }, { text: '阅读两篇全文', status: 'in_progress' }, { text: '整理评价协议和数据集', status: 'pending' }] }) }),
   ];
 }
 
@@ -86,8 +99,10 @@ const catalogStarted = new Promise(resolve => { signalCatalog = resolve; });
 const catalogReleased = new Promise(resolve => { releaseCatalog = resolve; });
 const catalogSettled = new Promise(resolve => { settleCatalog = resolve; });
 if (usageOnly) {
-  viewA = { ...viewA, usage: { ...usage, model_calls: 3, total_execution_seconds: 59.96, token_usage: { total_tokens: 12400, prompt_tokens: 12000, completion_tokens: 400 } }, runs: [
+  // 忙碌时才轮询；agent 工作区按对话累计，旧版调研保留各自的上限与进度。
+  viewA = { ...viewA, busy: true, usage: { ...usage, model_calls: 3, total_execution_seconds: 59.96, token_usage: { total_tokens: 12400, prompt_tokens: 12000, completion_tokens: 400 } }, runs: [
     { ...run, id: 'usage-old', created_at: '2026-11-02T00:00:00Z', status: 'partial', total_calls: 5, max_calls: 5, current_round: 2, max_rounds: 2, total_execution_seconds: 60.06, max_seconds: 60, model_calls: 2, token_usage: { total_tokens: null, prompt_tokens: 500, completion_tokens: null }, stop_reason: '达到调用上限，保留阶段性资料。' },
+    { ...run, id: 'usage-agent', agent: true, status: 'completed', created_at: '2026-11-04T00:00:00Z', total_calls: 14, model_calls: 9, total_execution_seconds: 95, token_usage: { total_tokens: 3000, prompt_tokens: 2500, completion_tokens: 500 } },
     { ...run, total_calls: 8, max_calls: 12, total_execution_seconds: 12, max_seconds: 600, current_round: 2, max_rounds: 4, model_calls: 3 },
   ] };
 }
@@ -99,7 +114,7 @@ let holdTrashAction = false;
 let releaseTrashAction, signalTrashAction;
 const trashActionStarted = new Promise(resolve => { signalTrashAction = resolve; });
 const trashActionReleased = new Promise(resolve => { releaseTrashAction = resolve; });
-let modelSettings = { enabled: false, protocol: 'openai_chat', base_url: '', model: '', api_key_set: false, source: 'environment', busy: false, active_provider_id: null, active_model: null, providers: [], limits: { research: { max_rounds: 3, max_calls: 20, max_seconds: 900 }, conversation: { calls_per_turn: 1, seconds_per_turn: 60 } } };
+let modelSettings = { enabled: false, protocol: 'openai_chat', base_url: '', model: '', api_key_set: false, source: 'environment', busy: false, active_provider_id: null, active_model: null, providers: [], limits: { agent: limits } };
 const settingsPosts = [];
 let holdSettingsSave = false;
 let rejectNextSettingsSave = false;
@@ -133,6 +148,8 @@ const browser = await chromium.launch({ headless: true, executablePath: process.
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', reducedMotion: 'reduce', colorScheme: themeOnly ? 'dark' : 'light' });
 const errors = [];
 const page = await context.newPage();
+// SKIP_SCREENSHOTS=1 只跑断言，不生成截图。
+if (process.env.SKIP_SCREENSHOTS) page.screenshot = async () => Buffer.alloc(0);
 page.setDefaultTimeout(8000);
 page.on('pageerror', error => errors.push(error.message));
 await context.route('**/*', async route => {
@@ -242,14 +259,26 @@ await context.route('**/*', async route => {
     }
     if (firstPost) {
       firstPost = false;
-      viewA = { ...viewA, messages: [...viewA.messages, message('supplement-user', taskA.id, 'user', payload.content), message('supplement-answer', taskA.id, 'assistant', '补充已收到（离线样例）', { action: 'research', run_id: run.id })] };
+      viewA = { ...viewA, messages: [...viewA.messages, message('supplement-user', taskA.id, 'user', payload.content), message('supplement-answer', taskA.id, 'assistant', '补充已收到（离线样例）', { run_id: run.id })] };
       return route.abort('failed'); // 服务端已保存，但响应不确定；客户端必须重试原request_id。
     }
     return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(viewA) });
   }
   if (url.pathname === `/api/runs/${run.id}/events`) {
     if (holdChatEvents) { signalChatEvents(); await chatEventsReleased; }
-    return json([{ id: 'event-1', run_id: run.id, stage: 'searching', category: 'search', message: '人工检索过程记录', created_at: now }]);
+    const turn = url.searchParams.get('turn_id');
+    const event = (id, category, text, actor = 'agent') => ({ id, run_id: run.id, turn_id: turn, actor, category, message: text, created_at: now });
+    // 两个阅读子 agent 的记录交错写入，界面应按论文归组。
+    if (turn === 'a-answer') return json([
+      event('answer-1', 'thought', '先检索近三年的多智能体通信论文。'),
+      event('answer-2', 'reader', '开始阅读「人工文献样例」', `reader:${paper.id}`),
+      event('answer-3', 'reader', '开始阅读「另一篇人工样例」', 'reader:other-paper'),
+      event('answer-4', 'tool', '读取全文第 2 页', `reader:${paper.id}`),
+      event('answer-5', 'reader', '「另一篇人工样例」完成：没有找到评价协议', 'reader:other-paper'),
+      event('answer-6', 'reader', '「人工文献样例」完成：记录 1 条证据', `reader:${paper.id}`),
+      event('answer-7', 'tool', '写入报告'),
+    ]);
+    return json([event('event-1', 'tool', '人工检索过程记录')]);
   }
   if (url.pathname === `/api/runs/${run.id}/papers`) {
     if (holdChatMaterials) { signalChatMaterials(); await chatMaterialsReleased; }
@@ -262,7 +291,7 @@ await context.route('**/*', async route => {
   }
   if (url.pathname === `/api/runs/${run.id}/papers/${paper.id}`) return json({ paper, sources: [source], evidence: analysisOnly ? [evidence] : [], ...(analysisOnly ? { analysis, selection, selected: true } : {}) });
   if (analysisOnly && url.pathname === `/api/runs/${run.id}/report`) return json(researchReport);
-  if (url.pathname === `/api/runs/${run.id}/report`) return json({ id: 'offline-report', run_id: run.id, title: '人工阶段性报告', content_markdown: '# 人工离线报告\n\n非真实研究结果。', gaps: ['人工样例，不用于科研结论。'], stop_reason: '离线界面验证' });
+  if (url.pathname === `/api/runs/${run.id}/report`) { reportRequests.push(url.searchParams.get('report_id')); return json({ id: 'offline-report', run_id: run.id, title: '人工阶段性报告', content_markdown: '# 人工离线报告\n\n非真实研究结果。', gaps: ['人工样例，不用于科研结论。'], stop_reason: '离线界面验证' }); }
   if (url.pathname === `/api/runs/${run.id}/report.md`) return route.fulfill({ contentType: 'text/markdown', body: '# 人工离线报告\n非真实研究结果。' });
   if (url.pathname.startsWith('/api/')) throw new Error(`Unexpected mocked API: ${url.pathname}`);
   const relative = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1));

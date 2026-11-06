@@ -2,7 +2,6 @@ from backend.app.domain.models import (
     Paper,
     Report,
     Run,
-    RunMessage,
     RunStage,
     RunStatus,
     SourceText,
@@ -41,14 +40,7 @@ def test_database_crud():
     assert updated_run.status == RunStatus.RUNNING
     assert updated_run.stage == RunStage.SEARCHING
 
-    # 3. Message 测试
-    msg = RunMessage(id="msg-1", run_id="run-1", content="请补充关注机器人控制")
-    db.save_run_message(msg)
-    messages = db.list_run_messages("run-1")
-    assert len(messages) == 1
-    assert messages[0].content == "请补充关注机器人控制"
-
-    # 4. Paper 与 SourceText 测试
+    # 3. Paper 与 SourceText 测试
     paper = Paper(
         id="arxiv:2203.08975",
         title="Test Paper",
@@ -74,7 +66,7 @@ def test_database_crud():
     assert len(st_list) == 1
     assert st_list[0].content == "Abstract content"
 
-    # 5. Report 测试
+    # 4. Report 测试
     report = Report(
         id="report-1",
         run_id="run-1",
@@ -136,21 +128,4 @@ def test_old_schema_is_migrated_without_deleting_history(tmp_path):
     assert db.get_run("oldrun").initial_input is None  # 不能编造已丢失的旧初始范围。
     db.interrupt_running()
     assert db.get_run("oldrun").status==RunStatus.INTERRUPTED
-    db.close()
-
-
-def test_shared_connection_rejects_duplicate_active_runs(tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-    from backend.app.storage.database import StateConflict
-    db=Database(tmp_path/"thread.db")
-    db.create_task(Task(id="t",topic="Agents"))
-    def create(i):
-        try:
-            db.create_run(Run(id=f"r{i}",task_id="t",initial_topic="Agents"))
-            return True
-        except StateConflict:
-            return False
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        assert sum(pool.map(create,range(2)))==1
-    assert len(db.list_runs())==1
     db.close()

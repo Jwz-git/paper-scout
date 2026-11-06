@@ -1,15 +1,16 @@
 """回收站不可逆删除的边界：事务、共享来源、在途请求及全量操作。"""
 from datetime import datetime, timedelta, timezone
 import asyncio
+import time
 from threading import Event
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from backend.app.adapters.llm import LLMResponse
 from backend.app.config import Settings
-from backend.app.domain.models import Task, Run, RunMessage, Paper, SourceText, SourceType, Evidence, Report
+from backend.app.agent.service import AgentService
+from backend.app.domain.models import Task, Run, Paper, SourceText, SourceType, Evidence, Report
 from backend.app.main import create_app
-from backend.app.workflow.engine import WorkflowEngine
 from backend.app.storage.database import Database
 
 
@@ -79,7 +80,8 @@ def test_permanent_delete_removes_related_records_and_preserves_shared_sources(c
         conn.execute("INSERT INTO run_sources VALUES('r-keep','s-shared')")
         for table in ('events', 'search_queries', 'assessments'):
             conn.execute(f"INSERT INTO {table} VALUES(?, 'r-delete', '{{}}')", (f'fixture-{table}',))
-    db.save_run_message(RunMessage(id='m', run_id='r-delete', content='artificial'))
+        conn.execute("INSERT INTO run_messages(id,run_id,content,status,created_at) VALUES('m','r-delete','artificial','applied',?)",
+                     (datetime.now(timezone.utc).isoformat(),))
     db.save_report(Report(id='report', run_id='r-delete', title='人工报告', content_markdown='fixture'))
     client.post(f'/api/conversations/{tid}/trash')
     assert client.post('/api/conversations/trash/delete', json={'ids': [tid]}).json()['ids'] == [tid]
@@ -114,28 +116,36 @@ def test_delete_all_checks_inflight_target_before_deleting_any_record(client):
     assert client.get('/api/conversations/trash').json()['total'] == 0
 
 
-def test_worker_holds_delete_until_late_model_result_is_finished(tmp_path):
+def test_worker_holds_delete_until_the_stopped_turn_has_finished(tmp_path):
     started, released, finished = Event(), Event(), Event()
 
     class DelayedModel:
         async def generate(self, messages, **kwargs):
             started.set()
-            await asyncio.get_running_loop().run_in_executor(None, released.wait, 3)
-            return LLMResponse(content='{"action":"clarify","content":"late fixture"}',
-                               parsed_json={"action": "clarify", "content": "late fixture"})
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, released.wait, 3)
+            except asyncio.CancelledError:
+                # 外部请求不会在取消的瞬间结束；本轮要等它返回、保存计数后才真正停止。
+                await loop.run_in_executor(None, released.wait, 3)
+                raise
+            step = {"actions": [{"tool": "reply", "content": "late fixture", "evidence_ids": []}]}
+            return LLMResponse(content=str(step), parsed_json=step)
 
     db = Database(tmp_path / 'worker.db')
     cfg = Settings(_env_file=None, llm_base_url='', llm_model='', llm_api_key='', data_dir=tmp_path)
-    app = create_app(config=cfg, db=db, engine=WorkflowEngine(db, llm_adapter=DelayedModel()))
+    app = create_app(config=cfg, db=db, agent=AgentService(db, DelayedModel()))
     try:
         with TestClient(app) as client:
-            process = app.state.dialogue.process
+            process = app.state.agent.process
 
             async def observe(turn):
-                await process(turn)
-                finished.set()
+                try:
+                    await process(turn)
+                finally:
+                    finished.set()
 
-            app.state.dialogue.process = observe
+            app.state.agent.process = observe
             result = client.post('/api/conversations', json={'content': 'fixture', 'request_id': 'late-delete'}).json()
             tid = result['task']['id']
             assert started.wait(3) and app.state.worker.active_task_id == tid
@@ -143,7 +153,9 @@ def test_worker_holds_delete_until_late_model_result_is_finished(tmp_path):
             assert client.post('/api/conversations/trash/delete', json={'ids': [tid]}).status_code == 409
             released.set()
             assert finished.wait(3)
-            assert app.state.worker.active_task_id is None
+            deadline = time.monotonic() + 3
+            while app.state.worker.active_task_id is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
             assert client.post('/api/conversations/trash/delete', json={'ids': [tid]}).status_code == 200
             assert db.get_task(tid) is None
     finally:

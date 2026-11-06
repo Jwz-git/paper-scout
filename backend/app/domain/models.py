@@ -92,14 +92,16 @@ class Run(BaseModel):
     id: str
     task_id: str
     initial_topic: str
+    # agent 工作区：一个对话一份，跨轮次保存论文、阅读记录、发现和报告；旧流水线运行为 False。
+    agent: bool = False
     status: RunStatus = RunStatus.QUEUED
     stage: RunStage = RunStage.UNDERSTANDING
     current_round: int = 1
-    max_rounds: int = 3
-    max_calls: int = 20
+    max_rounds: int = 4
+    max_calls: int = 60
     total_calls: int = 0
     total_execution_seconds: float = 0.0
-    max_seconds: float = 900.0
+    max_seconds: float = 1800.0
     initial_input: Optional[TaskInput] = None
     current_input: Optional[TaskInput] = None
     queries: List[str] = Field(default_factory=list)
@@ -110,7 +112,10 @@ class Run(BaseModel):
     analysis_revision: int = 1
     scope_history: Dict[int, TaskInput] = Field(default_factory=dict)
     query_targets: Dict[str, List[str]] = Field(default_factory=dict)
-    max_papers: int = 12
+    max_papers: int = 15
+    activity: Optional[str] = None
+    progress_at: Optional[datetime] = None
+    deepen: bool = False
     min_papers: int = 6
     min_per_subproblem: int = 2
     min_field_completeness: float = 0.6
@@ -128,16 +133,6 @@ class Run(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
-
-
-class RunMessage(BaseModel):
-    id: str
-    run_id: str
-    content: str
-    status: str = "pending"
-    impact_summary: Optional[str] = None
-    proposed_scope: Optional[TaskInput] = None
-    created_at: datetime = Field(default_factory=utc_now)
 
 
 class Paper(BaseModel):
@@ -159,9 +154,11 @@ class Paper(BaseModel):
 class Event(BaseModel):
     id: str
     run_id: str
-    stage: RunStage
+    stage: Optional[RunStage] = None
     category: str
     message: str
+    turn_id: Optional[str] = None
+    actor: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

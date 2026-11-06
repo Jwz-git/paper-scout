@@ -10,8 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
 
 from backend.app.adapters.llm import create_llm_adapter
-from backend.app.dialogue import TURN_SECONDS
-from backend.app.domain.models import Run
+from backend.app.agent.service import LIMITS
 from backend.app.storage.database import StateConflict
 
 
@@ -193,11 +192,8 @@ class ProviderSaveResult(BaseModel):
     settings: ModelSettingsView
 
 
-# 实际生效的执行上限：研究取运行模型的默认值，对话每轮固定一次模型调用。
-EFFECTIVE_LIMITS = {
-    "research": {name: int(Run.model_fields[name].default) for name in ("max_rounds", "max_calls", "max_seconds")},
-    "conversation": {"calls_per_turn": 1, "seconds_per_turn": int(TURN_SECONDS)},
-}
+# 实际生效的执行上限：对话 agent 每轮（含阅读子 agent）共用。
+EFFECTIVE_LIMITS = {"agent": dict(LIMITS)}
 
 
 class ModelSettingsService:
@@ -284,13 +280,11 @@ class ModelSettingsService:
         with db._get_connection() as connection:
             return bool(connection.execute(
                 "SELECT 1 FROM conversation_turns WHERE status IN ('queued','processing') LIMIT 1"
-            ).fetchone() or connection.execute(
-                "SELECT 1 FROM runs WHERE status IN ('queued','running','pause_requested') LIMIT 1"
             ).fetchone())
 
     def require_idle(self, db, worker):
         if self.busy(db, worker):
-            raise StateConflict("仍有排队或执行中的工作，请暂停研究并等待当前对话结束后再切换当前模型")
+            raise StateConflict("仍有排队或执行中的对话，请等待完成或停止后再切换当前模型")
 
     @staticmethod
     def resolve_key(update, previous):
@@ -310,7 +304,7 @@ class ModelSettingsService:
                                "models": p.models, "api_key_set": bool(p.api_key and p.api_key.get_secret_value())} for p in self.state.providers],
                 "limits": EFFECTIVE_LIMITS, "app_name": self.app_name, "app_version": self.app_version}
 
-    def commit(self, state, engine, dialogue, apply):
+    def commit(self, state, agent, apply):
         provider = next((p for p in state.providers if p.id == state.active_provider_id), None)
         adapter = create_llm_adapter(provider.protocol, provider.base_url, state.active_model, provider.api_key.get_secret_value() if provider.api_key else "") if apply and state.enabled else None
         payload = state.model_dump(exclude={"providers"})
@@ -329,10 +323,9 @@ class ModelSettingsService:
                 temporary.unlink(missing_ok=True)
         self.state, self.source = state, "local"
         if apply:
-            engine.llm = adapter
-            dialogue.llm = adapter
+            agent.llm = adapter
 
-    def save_provider(self, update, provider_id, db, worker, engine, dialogue):
+    def save_provider(self, update, provider_id, db, worker, agent):
         previous = self.find(provider_id) if provider_id is not None else None
         active = bool(self.state.enabled and previous and previous.id == self.state.active_provider_id)
         if active:
@@ -349,26 +342,26 @@ class ModelSettingsService:
                                  active_provider_id=None if removed_current else self.state.active_provider_id,
                                  active_model=None if removed_current else self.state.active_model,
                                  providers=providers)
-        self.commit(state, engine, dialogue, active)
+        self.commit(state, agent, active)
         return {"provider_id": provider.id, "settings": self.view(db, worker)}
 
-    def select_model(self, update, db, worker, engine, dialogue):
+    def select_model(self, update, db, worker, agent):
         provider = self.find(update.provider_id)
         if update.model not in provider.models:
             raise ValueError("模型不在此供应商的已选模型中")
         self.require_idle(db, worker)
         state = self.state.model_copy(update={"enabled": True, "active_provider_id": provider.id, "active_model": update.model})
-        self.commit(state, engine, dialogue, True)
+        self.commit(state, agent, True)
         return self.view(db, worker)
 
-    def delete_provider(self, provider_id, db, worker, engine, dialogue):
+    def delete_provider(self, provider_id, db, worker, agent):
         self.find(provider_id)
         active = provider_id == self.state.active_provider_id
         if active:
             self.require_idle(db, worker)
         state = self.state.model_copy(update={"providers": [p for p in self.state.providers if p.id != provider_id],
                     **({"enabled": False, "active_provider_id": None, "active_model": None} if active else {})})
-        self.commit(state, engine, dialogue, active)
+        self.commit(state, agent, active)
         return self.view(db, worker)
 
     async def list_models(self, update):
@@ -377,7 +370,7 @@ class ModelSettingsService:
         key = self.resolve_key(update, previous)
         return await list_models(update.base_url, update.protocol, key.get_secret_value(), update.cursor)
 
-    def save(self, update, db, worker, engine, dialogue):
+    def save(self, update, db, worker, agent):
         # 保留已发布的单模型设置入口；更新当前供应商，不拆出一份供应商凭据。
         self.require_idle(db, worker)
         previous = self.find(self.state.active_provider_id) if self.state.active_provider_id else None
@@ -387,5 +380,5 @@ class ModelSettingsService:
                                   protocol=update.protocol, base_url=update.base_url, models=[m for m in models if m], api_key=key)
         providers = [p for p in self.state.providers if p.id != provider.id] + [provider]
         state = ProviderSettings(enabled=update.enabled, active_provider_id=provider.id, active_model=update.model or None, providers=providers)
-        self.commit(state, engine, dialogue, True)
+        self.commit(state, agent, True)
         return self.view(db, worker)

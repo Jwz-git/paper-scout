@@ -13,7 +13,10 @@ export function exportConversation(view: ConversationView, format: 'markdown' | 
     const lines = [`# ${view.task.title || view.task.topic}`, '', `会话 ID：${view.task.id}`, `导出时间：${exportedAt}`, '', '## 研究问题', '', view.task.topic, '', '## 对话记录', ''];
     if (!view.messages.length) lines.push('尚无对话消息。', '');
     for (const message of view.messages) {
-      lines.push(`### ${message.role === 'user' ? '你' : 'Paper Scout'} · ${message.created_at}`, '', `状态：${statusLabels[message.status]}`, '', message.content || '（尚无回复内容）', '');
+      // 执行中连发消息并入同一轮后，留下的空助手回复不导出。
+      if (message.role === 'assistant' && message.status === 'completed' && !message.content && !message.work) continue;
+      const empty = message.work?.continued ? '（工作转到下一条回复继续）' : '（尚无回复内容）';
+      lines.push(`### ${message.role === 'user' ? '你' : 'Paper Scout'} · ${message.created_at}`, '', `状态：${statusLabels[message.status]}`, '', message.content || empty, '');
       if (message.error_category) lines.push(`错误类别：${message.error_category}`, '');
       for (const [index, citation] of message.citations.entries()) {
         lines.push(`引用 ${index + 1}：${sourceLabels[citation.source_type]}${citation.page_number != null ? ` · 第 ${citation.page_number} 页` : ''}`, `运行：${citation.run_id}；论文：${citation.paper_id}；来源快照：${citation.source_text_id}`, `字符范围：${citation.location_start ?? '未知'}—${citation.location_end ?? '未知'}`, ...(citation.source_url ? [`来源：${citation.source_url}`] : []), '', ...citation.quote.split('\n').map(line => `> ${line}`), '');

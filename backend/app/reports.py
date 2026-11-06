@@ -21,7 +21,8 @@ def blocks(report):
         yield "paragraph", "用户输出要求：" + doc.scope.output_requirements
     yield "paragraph", f"实际外部调用：{doc.total_calls}；模型调用：{doc.model_calls}；Token：{doc.token_usage.get('total_tokens') if doc.token_usage.get('total_tokens') is not None else '未知'}"
     yield "paragraph", f"分析截至快照的执行时间：{doc.execution_seconds:.2f}秒；执行上限/操作性门槛：" + "；".join(f"{key}={value:g}" for key, value in doc.limits.items())
-    yield "paragraph", "终止原因：" + (report.stop_reason or "未提供")
+    if report.stop_reason:
+        yield "paragraph", "终止原因：" + report.stop_reason
     yield "table", (["轮次", "查询与子问题", "结果/失败"], [[str(q.round_number), q.query_text + "\n" + "、".join(q.subproblems), f"{q.total_results} / {q.error_category or '无'}"] for q in doc.queries])
     for section in doc.sections:
         yield "heading", (2, section.title)

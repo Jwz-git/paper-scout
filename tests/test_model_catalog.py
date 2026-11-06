@@ -75,7 +75,7 @@ def test_provider_keeps_one_credential_and_current_model_while_models_change(cli
     result = response.json(); pid = result['provider_id']
     assert len(result['settings']['providers']) == 1
     assert result['settings']['active_model'] is None and not result['settings']['enabled']
-    assert client.app.state.engine.llm is None and 'artificial-secret' not in response.text
+    assert client.app.state.agent.llm is None and 'artificial-secret' not in response.text
     service = client.app.state.model_settings
     stored = json.loads(service.path.read_text())
     assert len(stored['providers']) == 1 and stored['providers'][0]['models'] == ['a', 'b']
@@ -83,10 +83,10 @@ def test_provider_keeps_one_credential_and_current_model_while_models_change(cli
     assert client.post('/api/settings/selection', json={'provider_id': pid, 'model': 'b'}).status_code == 200
     updated = client.post(f'/api/settings/providers/{pid}', json={**payload, 'models': ['a', 'b', 'c'], 'api_key': None}).json()
     assert len(updated['settings']['providers']) == 1 and updated['settings']['active_model'] == 'b'
-    assert client.app.state.engine.llm.model == 'b'
+    assert client.app.state.agent.llm.model == 'b'
     removed = client.post(f'/api/settings/providers/{pid}', json={**payload, 'models': ['a'], 'api_key': None}).json()
     assert not removed['settings']['enabled'] and removed['settings']['active_provider_id'] is None
-    assert client.app.state.engine.llm is None
+    assert client.app.state.agent.llm is None
 
 
 def test_provider_write_failure_keeps_all_models_and_current_runtime(client, monkeypatch):
@@ -94,13 +94,13 @@ def test_provider_write_failure_keeps_all_models_and_current_runtime(client, mon
     result = client.post('/api/settings/providers', json=payload).json()
     pid = result['provider_id']; service = client.app.state.model_settings
     client.post('/api/settings/selection', json={'provider_id': pid, 'model': 'a'})
-    before = service.path.read_bytes(); adapter = client.app.state.engine.llm
+    before = service.path.read_bytes(); adapter = client.app.state.agent.llm
     def fail(*args):
         raise OSError('artificial failure')
     monkeypatch.setattr('backend.app.model_settings.os.replace', fail)
     response = client.post(f'/api/settings/providers/{pid}', json={**payload, 'models': ['c', 'd']})
     assert response.status_code == 500 and 'artificial-secret' not in response.text
-    assert service.path.read_bytes() == before and client.app.state.engine.llm is adapter
+    assert service.path.read_bytes() == before and client.app.state.agent.llm is adapter
     assert service.state.providers[0].models == ['a', 'b']
     assert client.post(f'/api/settings/providers/{pid}', json={**payload, 'models': ['a', ' ']}).status_code == 422
 
@@ -120,7 +120,7 @@ def test_profile_migration_groups_only_matching_connections_and_keys(tmp_path):
         assert public['providers'][0]['name'] == '人工供应商'
         assert public['providers'][0]['models'] == ['a', 'b']
         assert public['active_provider_id'] == 'p1' and public['active_model'] == 'b'
-        assert client.app.state.engine.llm.model == 'b' and client.app.state.engine.llm._api_key == 'key-one'
+        assert client.app.state.agent.llm.model == 'b' and client.app.state.agent.llm._api_key == 'key-one'
         assert json.loads(path.read_text()) == old
         provider = public['providers'][0]
         assert client.post('/api/settings/providers/p1', json={k: provider[k] for k in ('name', 'protocol', 'base_url', 'models')}).status_code == 200

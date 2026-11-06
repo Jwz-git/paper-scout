@@ -6,47 +6,48 @@
 
 - `GET /api/conversations`：未删除会话，按更新时间倒序。`offset>=0`、`limit=1..100`（默认100）分页；`query` 按名称／问题做不区分大小写的字面子串搜索（最长2000字符）；`deleted=true` 查询回收站。按偏移分页，翻页期间有会话更新时可能出现个别重复或遗漏。
 - `POST /api/conversations/{task_id}/rename`：提交 `title`（去空白后1–120字符），只改显示名称，不改研究问题或原始运行范围。
-- `POST /api/conversations/{task_id}/trash`：在同一事务中停止对话／研究并标记删除；保留消息、来源、报告及预算，可重复调用。
-- `POST /api/conversations/{task_id}/restore`：恢复列表可见性，不恢复已停止的执行。回收站记录不允许继续发送、新建运行或通过运行接口恢复；首条消息旧请求标识的重发也不能复活已删除会话。
+- `POST /api/conversations/{task_id}/trash`：在同一事务中停止该会话的排队和处理中消息并标记删除；保留消息、来源、报告及用量，可重复调用。
+- `POST /api/conversations/{task_id}/restore`：恢复列表可见性，不恢复已停止的执行。回收站中的会话不允许继续发送消息；首条消息旧请求标识的重发也不能复活已删除会话。
 - `GET /api/conversations/trash`：独立回收站列表；`query` 按名称／问题做字面子串搜索（最长2000字符），`sort=newest/oldest/title`，`offset>=0`，`limit=1..100`（默认50）。返回 `{items,total,matched}`，分别为当前页、回收站总数、筛选后总数；`deleted_at` 用于展示删除时间。
-- `POST /api/conversations/trash/restore`：`{ids:[...]}` 恢复指定1–100个回收站会话，`{ids:null}` 恢复整个回收站；返回 `{tasks:[...]}`。不重启研究，不受列表分页或搜索条件限制。
-- `POST /api/conversations/trash/delete`：选择体同上，返回 `{ids:[...]}`。仅允许彻底删除回收站中的会话；移除消息、对话用量、轮次幂等记录、研究运行及其报告／事件／查询／评估等关联记录。无其他运行引用的来源／证据和无其他关联的论文一并清理，共用来源保留。目标会话仍由串行 worker 处理时返回409，避免在途结果写入已删除对象。
+- `POST /api/conversations/trash/restore`：`{ids:[...]}` 恢复指定1–100个回收站会话，`{ids:null}` 恢复整个回收站；返回 `{tasks:[...]}`。不重启已停止的工作，不受列表分页或搜索条件限制。
+- `POST /api/conversations/trash/delete`：选择体同上，返回 `{ids:[...]}`。仅允许彻底删除回收站中的会话；移除消息、对话用量、轮次幂等记录、工作区和旧运行及其报告／事件／查询／评估等关联记录。无其他运行引用的来源／证据和无其他关联的论文一并清理，共用来源保留。目标会话仍由串行 worker 处理时返回409，避免在途结果写入已删除对象。
 - 批量恢复／删除在同一数据库事务内完成：明确指定的任一会话已恢复或不存在，整体返回409，不部分执行；空数组／未提交 `ids` 返回422。全量操作必须明确提交 `null`，空回收站返回空结果。界面彻底删除及全量恢复需确认，支持关闭窗口，已提交操作继续并反馈结果。
 - `POST /api/conversations`：提交首条自然语言消息，创建会话并排队，返回 `202`。
 - `GET /api/conversations/{task_id}`：任务、真实消息、所有运行、对话用量、busy 和模型是否配置。
-- `POST /api/conversations/{task_id}/messages`：追加并排队消息，返回 `202`。默认 `mode=auto`；`research/ask/pause/resume/cancel` 是显式覆盖，不是强制交互步骤。
-- `POST /api/conversations/{task_id}/stop`：直接停止当前工作，返回 `200` 会话视图；无需模型或请求体。中断排队／处理中的对话，取消排队、执行中或等待暂停的研究，以及被这些对话轮次临时暂停的研究；用户自己暂停或等待补充（`needs_input`）的研究保留。即使尚无 Run 也可停止；迟到模型结果不能重启工作，重复停止无新增副作用。
+- `POST /api/conversations/{task_id}/messages`：追加并排队消息，返回 `202`。执行中也可发送，agent 在下一次模型调用前并入（见 [对话 agent](<04-agent-workflow.md>) 的“执行中插话”）。`mode` 为 `auto`（默认）、`research`（提示用户要求开展调研）或 `ask`（只用已保存资料，拒绝检索和新的全文下载）。
+- `POST /api/conversations/{task_id}/stop`：停止当前工作，返回 `200` 会话视图；无需模型或请求体。该会话所有排队和处理中的消息标为 `interrupted`，助手消息显示“已停止。”，正在进行的模型或外部请求被取消。即使尚无工作区也可停止；迟到的模型结果不能改写已停止的消息，重复停止无新增副作用。
 
-提交包含 `content` 和 `request_id`。同一请求标识及内容重发返回已保存会话，不重复执行；冲突复用或同会话已有待处理消息返回 `409`。首条文本最多2000字符，后续最多4000字符；接口本身不发起外部服务调用。
+提交包含 `content` 和 `request_id`。同一请求标识及内容重发返回已保存会话，不重复执行；同一标识对应不同内容或模式返回 `409`。首条文本最多2000字符，后续最多4000字符；接口本身不发起外部服务调用。
 
-`ChatMessage` 保存角色、文本、状态（queued、processing、completed、failed、interrupted）、实际动作、所属 Run、时间、错误类别和引用。`ChatCitation` 保存运行／论文／快照标识、读取类型、来源链接、页码、精确原文及字符区间。原文匹配不等于语义支持核验。
+`ChatMessage` 保存角色、文本、状态（queued、processing、completed、failed、interrupted）、所属 Run、时间、错误类别、引用和本轮工作状态 `work`。`action` 只出现在旧版消息中。`ChatCitation` 保存运行／论文／快照／证据标识、读取类型、来源链接、页码、原文及字符区间。原文匹配不等于语义支持核验。
 
-对话与研究用量分别显示，研究 Run 的既有限制不变；消息失败不会伪造助手回答或回滚掉用户消息。旧任务和旧运行保留，不把旧研究输入伪造成新助手发言。`busy` 仅表示有排队或处理中的对话，不表示研究正在执行；研究进行中仍可发送补充。
+`AgentWork` 在执行中持续保存，供界面轮询显示：`run_id`、当前动作 `activity`、步数 `steps`、外部调用 `calls`（其中模型调用 `model_calls`）、执行秒数 `seconds`、最近进展时间 `progress_at`、计划清单 `todos`（`text` 与 `pending/in_progress/done`）、已启动的阅读子 agent 数 `subagents`、本轮生成的 `report_id`、终止原因 `stop_reason`、是否转到后续消息继续 `continued`，以及本轮上限 `limits`。
+
+消息失败不会伪造助手回答或回滚用户消息。旧任务和旧运行保留，不把旧研究输入伪造成新助手发言。`busy` 表示该会话有排队或处理中的消息。
 
 ### 会话执行语义
 
-1. 创建和追加消息时，用户消息与待处理助手消息成对持久化。HTTP 只排队，模型决策和研究由同一单进程串行 worker 执行。
-2. `request_id` 对应一次发送及其内容、模式；同标识同请求返回原记录，冲突复用返回 `409`。重发不等于重试模型调用，同会话只允许一个待处理对话轮次。
-3. 执行中收到补充，在当前外部请求结束或超时后的检查点暂停；新范围、原始补充及其处理结果进入原 Run，重新规划并核对历史论文后继续。运行标识、来源历史和累计预算保持不变。
-4. 自动继续只适用于该对话轮次拥有的临时暂停：回答、澄清或对话失败后，被本轮临时暂停的研究重新排队；补充研究方向时按新范围重新规划后继续。人工暂停和 `needs_input` 不隐式恢复，用户显式继续仍需满足状态约束。
-5. 资料回答只使用已保存快照，回答本身不新建研究或查询。若原研究仅为本次问答临时暂停，可恢复原 Run 并在回复中说明；回答引用的历史 Run 不改变应恢复的运行。终态后的新研究创建新 Run，旧报告与来源保留。
-6. 会话级停止直接中断待处理对话并取消正在进行的研究（范围见上文 `stop` 接口），不依赖已有 Run 或模型调用。停止状态是事实来源，迟到的模型成功、错误和旧队列快照不得覆盖它或启动研究；已发起调用及可得用量仍计入。
-7. 无模型模式仅支持关键词检索（问题拆成关键词后以 AND 组合检索 arXiv）和显式控制，不理解任意补充，也不生成语义回答。无法处理时保留用户文本并显示原因。
-8. 进程重启将已开始处理的对话标记为 `interrupted`，不重放可能已经收费的请求；尚未发起的 `queued` 消息可继续执行。
+1. 创建和追加消息时，用户消息与待处理助手消息成对持久化。HTTP 只排队，agent 由同一单进程串行 worker 执行，一次处理一个会话的一轮。
+2. `request_id` 对应一次发送及其内容、模式；同标识同请求返回原记录。重发不等于重试模型调用。
+3. 每个会话有一个 `agent=true` 的 Run 作为工作区，在首次处理消息时创建；后续轮次和插话都使用这个工作区，候选论文、原文、证据、纳入判断和报告跨轮次保留。
+4. 执行中收到的消息在下一次模型调用前并入当前轮：已开始的助手消息标记 `continued=true` 并完成，后续工作和最终回复写到最新一条助手消息；尚未开始工作的空助手消息不显示。模式以最新消息为准。
+5. 停止状态是事实来源：停止后迟到的模型成功、错误和旧队列快照都不能覆盖它；已发起的调用仍计入用量，被取消调用的 token 记为未知。
+6. 未配置模型时消息直接失败并提示先配置模型；没有无模型的检索模式。
+7. 进程重启将处理中的消息标记为 `interrupted`，不重放可能已经收费的请求；尚未开始的 `queued` 消息继续执行。旧流水线遗留的未结束运行（`queued/running/pause_requested/paused/needs_input`）标为 `interrupted`，并在会话中追加一条说明。创建工作区时，同会话旧运行已纳入的论文作为候选、已取得的原文作为可读快照带入，不重复下载。
 
 已发送消息和处理状态保存在服务端。未发送草稿及待确认的请求标识仅在当前前端组件会话中保留，切换对话不丢失，但刷新或关闭浏览器后的恢复尚未实现；草稿和密钥不写入浏览器持久存储。
 
 ### 对话来源与用量
 
-模型上下文仅包含有界的会话历史、论文元数据清单（标题、作者、年份、链接）和已保存来源片段，披露截断、读取类型和缺失。来源片段按论文轮流选取，每篇先摘要后全文页，最多24段、合计24000字符，单段上限随论文数在1000–3000字符之间；同一论文出现在多个运行时取最近一次。论文内容是数据，不是指令。模型不能选择任意 URL、命令或工具。引用必须匹配本会话所提供的运行、论文、快照、来源类型／链接、页码、精确原文与字符区间；无效引用使该回答失败，不降级成无来源的“成功”。界面按引用打开对应快照和原文定位。
+agent 只能通过工具接触论文：检索结果进入工作区候选，原文由 `read`/`find` 返回，证据由 `note` 保存（规则见 [对话 agent](<04-agent-workflow.md>) 的“证据规则”）。论文内容是数据，不是指令；模型不能选择任意 URL、命令或工具。`reply` 和 `report` 只能引用工作区中已保存的证据标识；回复引用无效标识时错误交回模型改正，不降级成无来源的“成功”。回复引用由证据转换为 `ChatCitation`，界面按引用打开对应快照和原文定位。
 
 **字符定位一致仅证明引用原文存在，不证明其语义支持回答。** 归纳仍需人工复核；仅摘要、部分全文、复杂表格或扫描件不构成可靠科研比较的保证。无资料时可以明确说明证据不足、请求澄清或建议下一步，但不得补造无来源的论文事实。
 
-对话与研究分别记录实际调用、执行时间和可得 token；失败的已发起请求计入用量，未知 token 保持 `null`。`ConversationUsage` 只保存累计统计（`model_calls`、`total_execution_seconds`、`token_usage`），没有会话终身上限；每轮至多一次模型调用、最长60秒。研究 Run 另有20次外部调用、900秒及轮次限制，不因继续对话而重置，暂停等待不计研究执行时间。
+会话（`ConversationUsage`：`model_calls`、`total_execution_seconds`、`token_usage`）和工作区 Run（`total_calls`、`model_calls`、`total_execution_seconds`、`token_usage`）分别累计实际调用、执行时间和可得 token，只做统计，没有终身上限。执行上限按轮计算，每条新消息一份新额度（数值见 [对话 agent](<04-agent-workflow.md>) 的“执行上限”）。失败或被取消的已发起请求计入调用；任何一次调用没有返回用量时 token 保持 `null`，不当作零。
 
 ## 实际AI服务接口
 
-- `GET /api/settings` 返回当前 `enabled/protocol/base_url/model/api_key_set`、`active_provider_id/active_model`、`providers`、`source`、执行 `busy` 及只读 `limits`。`limits` 是当前实际生效的值，形如 `{research:{max_rounds,max_calls,max_seconds}, conversation:{calls_per_turn,seconds_per_turn}}`，不可通过接口修改。每家供应商包含 `id/name/protocol/base_url/models/api_key_set`，没有密钥或片段；响应不缓存。
+- `GET /api/settings` 返回当前 `enabled/protocol/base_url/model/api_key_set`、`active_provider_id/active_model`、`providers`、`source`、执行 `busy` 及只读 `limits`。`limits` 是当前实际生效的值，形如 `{agent:{steps,calls,seconds,fulltexts,readers,reader_steps}}`，不可通过接口修改。每家供应商包含 `id/name/protocol/base_url/models/api_key_set`，没有密钥或片段；响应不缓存。
 - `POST /api/settings/providers` 新增，`POST /api/settings/providers/{id}` 编辑。提交 `name`（可空，最多80字符）、`protocol/base_url/models`（1–100个非空且各不超过200字符的模型ID）、可选 `api_key/clear_api_key`，返回 `{provider_id,settings}`。同一家供应商以一笔原子保存更新连接信息与完整模型清单；不会自动选择型号。修改当前供应商要求全局空闲，其他供应商可编辑。
 - `POST /api/settings/models`：提交 `provider_id`（新供应商null）、`protocol/base_url`、可选 `api_key/clear_api_key/cursor`。使用本次凭据或该供应商已有凭据读取外部 `/models`，返回 `{models:[{id,name}],next_cursor}`。Anthropic分页100项，通过 `cursor` 请求下一页；OpenAI返回列表。不保存配置，不发起生成请求，不修改会话用量。HTTP请求各阶段15秒超时，不重试、不跟随重定向。鉴权失败400、限流429、超时504、其他服务／响应格式错误502，不回传供应商原始错误正文。
 - `POST /api/settings/selection`：输入 `provider_id/model`，只能选择该供应商已保存的型号；同步更新对话与研究适配器，要求全局空闲，不发起模型调用。此操作仅从对话输入区发起。
@@ -71,23 +72,22 @@
 
 `PaperAnalysis` 以不可变 JSON 记录保存字段、实验、范围修订、实际输入区间、状态、错误类别和可选的复用来源；新增结果不覆盖旧记录。`Extraction` 的事实值关联证据；缺失为null加 `MissingReason`，空字符串或没有证据的非空字段不能通过模型入口。`origin=author/inference/user` 分别表示作者自述、系统推断和用户要求，不能将用户要求当作论文事实。
 
-`ReadRange` 保存快照 ID、类型、页码、全局 `[start,end)` 与原文本长度；实际提供片段与保存/解析的全文分开。单次提取最多18000字符、窗口3000字符。筛选和结构化提取的模型引用只返回 `source_text_id/quote`，不要求模型计算字符位置；程序只在该来源本次实际提供的窗口中唯一、逐字匹配摘录，再计算并保存Evidence的全局区间与页码。未找到、存在多处匹配或来源未提供时明确失败，不扩展到未读全文搜索、不模糊匹配、不取第一个近似结果。引用文本保留首尾空白、换行及Unicode字符，不适用普通模型字段的空白裁剪。持久化及对外Evidence区间仍使用Python Unicode字符索引，与前端 `Array.from()` 对齐，既有证据和报告不迁移或重算。`not_found` 仅指已提供范围，不宣称整篇论文未报告。
+`ReadRange` 保存快照 ID、类型、页码、全局 `[start,end)` 与原文本长度，记录实际返回给模型的范围（摘要、读过的页、`find` 窗口）；下载或解析成功的全文不等于已读。agent 的 `note` 只提交 `source_text_id/quote`，不要求模型计算字符位置；代码在该来源中定位摘录，比较时忽略空白、连字符和 Unicode 兼容形式差异（PDF 换行与断词），保存的 Evidence 是原文中实际对应的那一段，数据库再核对 `content[start:end]==quote`。摘录过短、找不到、多处匹配无法唯一定位、来源不属于该论文或位置不在已读范围内时，这条引文被拒绝并附原因返回模型，不取第一个近似结果。持久化及对外 Evidence 区间使用 Python Unicode 字符索引，与前端 `Array.from()` 对齐，既有证据和报告不迁移或重算。`not_found` 仅指已读范围，不宣称整篇论文未报告。
 
-`PaperSelection` 保存范围修订、相关性、子问题、理由与依据；容量截断明确为未审阅。单篇筛选结果缺失或无效时，该篇记为 `relevant=false, reviewed=false`，`error` 保存原因，并在评估缺口中列出，不影响其他论文。尚无当前修订筛选记录或 `reviewed=false` 的论文只能标为候选，不能凭检索结果或 `selected=true` 声称已完成语义筛选；评估明确列出未筛选缺口，此时组数标为候选数量。整批筛选的模型调用或输出格式失败时，仍可保存来源报告，但不发布筛选结论。DOI与同来源标识用于逻辑同作分组，arXiv版本独立保存；标题作者相似只记录疑似关系，不删除论文或混合版本事实。
+`PaperSelection` 保存范围修订、是否纳入和理由。agent 通过 `decide` 写入，以最后一次判断为准；报告引用了尚未判断的论文时自动纳入，理由记为“报告引用了这篇论文的证据”；没有判断记录的论文只是候选。DOI 与同来源标识用于逻辑同作分组，arXiv 版本独立保存；标题作者相似只记录疑似关系，不删除论文或混合版本事实。
 
-分析业务校验失败时，运行事件和停止原因保留 `AnalysisError` 类别及代码生成的具体原因，例如候选覆盖不全、未知子问题、缺少依据、来源范围错误、原文不匹配或多处匹配无法唯一定位；不拼接模型原始输出、用户字段值或供应商响应，不自动重试。单篇提取的业务校验或格式失败只将该篇分析记为失败，继续处理其他论文。
+旧流水线保存的筛选（含 `reviewed`、子问题、依据）、逐篇分析和评估按原结构读取展示，不迁移或重算。
 
 `Experiment` 保留数据集/版本、划分、指标/值/单位/方向、评价协议与计算条件的原文信息及证据。`Comparison` 区分 `comparable/not_comparable/insufficient`；未知条件不自动视作相同，不隐式单位换算或生成总体排名。
 
-`Assessment` 保存规则版本、支持论文组、字段分子/分母、比较、缺口及下一动作。`Report.document` 固定当前范围、纳入资料、未纳入的已筛选论文（`excluded_papers`，用于在筛选记录中显示标题和链接）、字段、比较、综合主张、证据与执行统计；多格式渲染共用此结构。报告保存与完成状态使用同一短事务，不能先发布成功再补报告。
+`Assessment` 保存规则版本、支持论文组、字段分子/分母、比较、缺口及下一动作。`Report.document` 固定当前范围、纳入资料、未纳入的已筛选论文（`excluded_papers`，用于在筛选记录中显示标题和链接）、字段、比较、综合主张、证据与执行统计；多格式渲染共用此结构。agent 的 `report` 工具在同一事务中保存报告与评估：字段覆盖、实验比较和“尚未阅读／未读取全文”缺口由代码计算，章节与主张由模型给出并只能引用已保存证据。一个工作区可有多份报告，按 `report_id` 区分。
 
 ## 核心实体
 
 | 实体 | 关键字段与约束 |
 | --- | --- |
 | Task | id、独立显示名称title、软删除时间deleted_at、研究问题、年份范围（含起止年）、关注维度、输出要求、创建和更新时间。 |
-| Run | id、task_id、初始输入快照、status、stage、执行限制配置及累计用量、创建／开始／结束时间、终止原因；暂停和继续保留同一 run_id 与计数。 |
-| RunMessage | id、run_id、用户补充文本、时间、处理状态及其对计划的影响；按顺序追加，不修改原始输入。 |
+| Run | id、task_id、`agent`、初始输入快照、status、stage、累计用量、创建／开始／结束时间、终止原因。`agent=true` 为对话工作区，每个会话一个，状态固定为 `completed`，每轮的进度和终止原因记在助手消息的 `work` 中；`agent=false` 为旧流水线运行，只读保留。 |
 | AIProvider | 名称、协议、服务地址、可用模型ID清单和服务端单份凭据；读取仅返回密钥是否保存。当前选择另存供应商ID和型号，不把每个型号拆成独立供应商。 |
 | SearchQuery | run_id、轮次、查询、来源、筛选条件、时间、结果数量和错误类别。 |
 | Paper | id、标题、作者、年份、DOI、来源 ID 和链接；各来源的原始记录和获取时间保留，缺失字段可空。 |
@@ -97,7 +97,7 @@
 | Extraction | run_id、paper_id、字段名、值或空值、证据 ID 列表、缺失原因；事实与推断分开。 |
 | Assessment | run_id、轮次、各子问题覆盖、字段完整率、缺口、规则结果和决定。 |
 | Report | run_id、章节、带证据引用的主张、参考文献、缺口、终止原因和生成时间。 |
-| Event | run_id、时间、阶段、事件类别及对用户有意义的简短说明。 |
+| Event | run_id、时间、事件类别及对用户有意义的简短说明；agent 事件另有 `turn_id`（对应助手消息）和 `actor`（`agent`、`user` 或 `reader:{paper_id}`），旧事件保留阶段。 |
 
 论文版本和出版状态如数据源可提供则保存；预印本和正式版本不因标题近似自动合并。DOI 标准化后精确匹配；不同来源 ID 只能在同来源内精确匹配。标题相似只能标记疑似重复，不自动合并。
 
@@ -105,9 +105,9 @@
 
 ## 运行状态
 
-`queued`（排队）、`running`（执行）、`pause_requested`（等待当前请求结束）、`paused`（暂停）、`needs_input`（需要补充）、`completed`（满足条件并完成报告）、`partial`（受限但有可交付部分结果）、`failed`（无法形成可交付结果）、`cancelled`（用户取消）、`interrupted`（进程中断）。阶段单独记录：理解、规划、检索、解析、评估、综合和报告。
+对话工作区 Run 不使用运行状态表达进度，固定为 `completed`；一轮工作的状态是助手消息的 `status`，终止原因是 `work.stop_reason`。
 
-暂停请求在当前外部请求结束或超时后生效；不发起新的外部请求，并保存检查点。`paused` 和 `needs_input` 均可接收补充信息，用户显式继续后排队执行，保持 run_id、历史证据和累计用量。继续前重新检查补充信息对计划及已有论文相关性的影响，并记录处理结果；与新范围不再相关的结果保留历史但不纳入新报告。暂停等待时间不计入运行时限；实际执行时间和调用计数跨暂停累加。终态不可原地重启，重新尝试产生新 Run。取消保留已有数据；请求中的外部调用可能需要等待超时或返回。`partial` 必须包含缺口和终止原因；没有任何可供核查的成果时为 `failed`。
+旧流水线运行保留原状态值：`queued`、`running`、`pause_requested`、`paused`、`needs_input`、`completed`、`partial`、`failed`、`cancelled`、`interrupted`，以及理解、规划、检索、筛选、提取、分析、评估、综合、报告等阶段。启动时未结束的旧运行标为 `interrupted`，不再继续、暂停或恢复；其报告、来源和事件仍可查看。
 
 ## 其他 HTTP 接口
 
@@ -118,20 +118,14 @@
 | POST /tasks | 创建任务，返回任务；不自动调用外部服务。 |
 | GET /tasks | 列出任务，`limit=1..100`（默认50）。 |
 | GET /tasks/{task_id} | 获取任务。 |
-| GET /tasks/{task_id}/runs | 获取任务的历史运行。 |
-| POST /tasks/{task_id}/runs | 创建并排队新运行；同任务有活动运行时返回冲突。 |
-| GET /runs/{run_id} | 查询状态、阶段、执行限制及用量、缺口与终止原因。 |
-| POST /runs/{run_id}/pause | 请求暂停；已在途请求完成或超时后进入 paused。 |
-| POST /runs/{run_id}/messages | 在 paused 或 needs_input 时追加补充信息，保留记录。 |
-| GET /runs/{run_id}/messages | 查看补充信息及处理状态。 |
-| POST /runs/{run_id}/resume | 从 paused 或 needs_input 继续同一运行；先处理待处理补充信息。 |
-| POST /runs/{run_id}/cancel | 请求取消，返回当前状态；重复请求保持结果一致。 |
-| GET /runs/{run_id}/events | 查看时间顺序事件与检索记录。 |
+| GET /tasks/{task_id}/runs | 获取任务的全部运行（含对话工作区和旧运行）。 |
+| GET /runs/{run_id} | 查询运行与累计用量。 |
+| GET /runs/{run_id}/events | 按时间顺序查看事件；可选 `turn_id` 只看某一轮。 |
 | GET /runs/{run_id}/papers | 查看论文及读取状态。 |
 
 论文详情、分析和报告接口见“实际研究分析与报告接口”。输入错误返回可读的 4xx；不存在返回 404；状态冲突返回 409。服务内部故障记录日志并返回不泄露密钥的错误信息。
 
-外部服务错误类别：模型与 arXiv 的 HTTP 5xx 记为 `server_error`，与 `rate_limited`、`timeout`、`network_error` 同属暂时性错误，按有限次数重试（见[研究流程](<04-agent-workflow.md>)）；PDF 解析子进程异常退出或解析库抛出意外错误记为 `parse_failed`。
+外部服务错误类别：模型与 arXiv 的 HTTP 5xx 记为 `server_error`，与 `rate_limited`、`timeout`、`network_error` 同属暂时性错误，按有限次数重试（见 [对话 agent](<04-agent-workflow.md>)）；PDF 解析子进程异常退出或解析库抛出意外错误记为 `parse_failed`。
 
 ## 报告约定
 

@@ -28,6 +28,7 @@
 .usage-token-row dd { margin: 9px 0 0; overflow-wrap: anywhere; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
 .usage-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; padding-top: 0; border-top: 0; }
 .usage-totals dd { color: var(--text); font-size: 20px; }
+.usage-agent-totals { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .usage-run-label { display: block; margin: 21px 0 9px; color: var(--faint); font-size: 10px; }
 .usage-run-select { display: block; width: 100%; min-width: 0; min-height: 40px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--text); font: 11px var(--font); text-overflow: ellipsis; }
 .usage-run-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 24px; color: var(--faint); font-size: 10px; line-height: 1.8; }
