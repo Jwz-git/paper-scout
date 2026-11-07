@@ -187,7 +187,9 @@ class OpenAIResponsesAdapter(BaseLLMAdapter):
     def _parse_response(self, data: dict, response_format: Optional[str]) -> LLMResponse:
         usage = _usage(data.get("usage"), "input_tokens", "output_tokens")
         if data.get("status") in ("incomplete", "failed", "cancelled", "queued", "in_progress"):
-            raise LLMError("incomplete", "模型响应未完成，不能用作完整结果。", usage=usage)
+            reason = (data.get("incomplete_details") or {}).get("reason")
+            raise LLMError("incomplete", "模型响应未完成，不能用作完整结果。", usage=usage,
+                           diagnostic=f"status={data['status']}" + (f"，reason={reason}" if reason else ""))
         parts, structured = [], None
         for item in data.get("output", []):
             if item["type"] == "message":

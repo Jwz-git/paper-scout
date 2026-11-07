@@ -1,5 +1,5 @@
 <template>
-  <main :inert="settingsOpen" class="workspace" :class="{ 'panel-visible': panelOpen, 'welcome-view': selectedKey === NEW_CHAT, 'sidebar-collapsed': !compactLayout && sidebarCollapsed }">
+  <main :inert="settingsOpen" class="workspace" :class="{ 'panel-visible': panelOpen, 'welcome-view': selectedKey === NEW_CHAT, 'sidebar-collapsed': !compactLayout && sidebarCollapsed, resizing: !!resizing }" :style="paneStyle">
     <button
       v-if="compactLayout && (sidebarOpen || panelOpen)"
       class="mobile-scrim"
@@ -56,6 +56,7 @@
       <button ref="trashButton" class="sidebar-settings" type="button" @click="openTrash"><UiIcon name="trash" />回收站<UiIcon name="chevronRight" /></button>
       <button ref="settingsButton" class="sidebar-settings" type="button" aria-label="打开设置" @click="openSettings('general')"><UiIcon name="settings" />设置<UiIcon name="chevronRight" /></button>
       </div>
+      <div v-if="!compactLayout" class="resize-handle resize-sidebar" :class="{ dragging: resizing === 'sidebar' }" role="separator" aria-orientation="vertical" aria-label="调整对话列表宽度，双击恢复默认" tabindex="0" :aria-valuemin="PANE_LIMITS.sidebar[0]" :aria-valuemax="PANE_LIMITS.sidebar[1]" :aria-valuenow="preferences.sidebarWidth ?? undefined" @pointerdown="startResize('sidebar', $event)" @keydown="nudgePane('sidebar', $event)" @dblclick="preferences.sidebarWidth = null"></div>
     </aside>
 
     <section class="chat-shell" :inert="compactLayout && (sidebarOpen || panelOpen)" aria-label="研究对话">
@@ -125,16 +126,27 @@
                         <div class="process-content">
                           <p v-if="processState(entry.message.id).loading" class="muted" role="status">正在读取过程记录…</p>
                           <p v-if="processState(entry.message.id).error" class="error-message" role="alert">{{ processState(entry.message.id).error }} <button class="text-button" @click="loadProcess(entry.message.id)">重试</button></p>
-                          <ol v-if="processState(entry.message.id).items.length" class="event-list">
-                            <template v-for="item in processState(entry.message.id).items" :key="item.id">
-                              <li v-if="item.kind === 'event'"><time :datetime="item.event.created_at">{{ clockTime(item.event.created_at) }}</time><span>{{ eventLabels[item.event.category] || item.event.category }}</span><p>{{ item.event.message }}</p></li>
-                              <li v-else class="reader-group">
-                                <span>阅读子 agent · {{ item.paperId }}</span>
-                                <ol class="event-list">
-                                  <li v-for="event in item.events" :key="event.id"><time :datetime="event.created_at">{{ clockTime(event.created_at) }}</time><span>{{ eventLabels[event.category] || event.category }}</span><p>{{ event.message }}</p></li>
+                          <ol v-if="processState(entry.message.id).items.length" class="process-steps">
+                            <li v-for="item in processState(entry.message.id).items" :key="item.id">
+                              <details v-if="item.detail || item.entries.length" class="process-fold">
+                                <summary><UiIcon name="chevronRight" /><span class="fold-title">{{ item.title }}</span><small :class="{ failed: item.failures }">{{ stepMeta(item) }}</small><time :datetime="item.time">{{ clockTime(item.time) }}</time></summary>
+                                <p v-if="item.detail" class="fold-detail">{{ item.detail }}</p>
+                                <ol v-if="item.entries.length" class="event-list">
+                                  <template v-for="logEntry in item.entries" :key="logEntry.id">
+                                    <li v-if="logEntry.kind === 'event'"><span>{{ eventLabels[logEntry.event.category] || logEntry.event.category }}</span><time :datetime="logEntry.event.created_at">{{ clockTime(logEntry.event.created_at) }}</time><p>{{ logEntry.event.message }}</p></li>
+                                    <li v-else class="reader-group">
+                                      <details class="process-fold">
+                                        <summary><UiIcon name="chevronRight" /><span class="fold-title">{{ logEntry.title }}</span><small :class="{ failed: logEntry.status === '失败' }">{{ logEntry.status || '阅读中' }}</small></summary>
+                                        <ol class="event-list">
+                                          <li v-for="event in logEntry.events" :key="event.id"><span>{{ eventLabels[event.category] || event.category }}</span><time :datetime="event.created_at">{{ clockTime(event.created_at) }}</time><p>{{ event.message }}</p></li>
+                                        </ol>
+                                      </details>
+                                    </li>
+                                  </template>
                                 </ol>
-                              </li>
-                            </template>
+                              </details>
+                              <p v-else class="process-line" :class="{ 'from-user': item.fromUser }"><span class="fold-title">{{ item.title }}</span><time :datetime="item.time">{{ clockTime(item.time) }}</time></p>
+                            </li>
                           </ol>
                           <p v-else-if="!processState(entry.message.id).loading && !processState(entry.message.id).error" class="muted">还没有记录。</p>
                         </div>
@@ -220,6 +232,7 @@
       :aria-modal="compactLayout ? true : undefined"
       aria-labelledby="materials-title"
     >
+      <div v-if="!compactLayout" class="resize-handle resize-panel" :class="{ dragging: resizing === 'materials' }" role="separator" aria-orientation="vertical" aria-label="调整资料面板宽度，双击恢复默认" tabindex="0" :aria-valuemin="PANE_LIMITS.materials[0]" :aria-valuemax="PANE_LIMITS.materials[1]" :aria-valuenow="preferences.materialsWidth ?? undefined" @pointerdown="startResize('materials', $event)" @keydown="nudgePane('materials', $event)" @dblclick="preferences.materialsWidth = null"></div>
       <header class="panel-header">
         <h2 id="materials-title"><UiIcon name="documents" />本对话资料</h2>
         <button ref="panelCloseButton" class="icon-button" aria-label="关闭资料面板" @click="closePanel"><UiIcon name="close" /></button>
@@ -290,7 +303,7 @@ import SettingsDialog from './components/SettingsDialog.vue';
 import ActionDialog from './components/ActionDialog.vue';
 import TrashDialog from './components/TrashDialog.vue';
 import { useDismissableMenus, closeMenus } from './composables/useDismissableMenus';
-import { usePreferences } from './composables/usePreferences';
+import { PANE_LIMITS, usePreferences } from './composables/usePreferences';
 import { eventLabels, runLabels, todoLabels } from './runLabels';
 import type { ModelSettings } from './api/client';
 import { ApiError, getModelSettings, selectProviderModel, renameConversation, trashConversation, restoreConversation, getConversations, getConversation, sendConversationMessage, stopConversation, getPapers, getRunEvents, getReport, getPaperDetail, getReportFile, type Task, type ConversationView, type ChatMode, type ChatMessage, type ChatCitation, type AgentWork, type Run, type ChatStatus, type SourceType, type Paper, type Report, type RunEvent, type PaperDetail } from './api/client.ts';
@@ -422,6 +435,47 @@ const compactLayout = ref(compactQuery.matches);
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const panelOpen = ref(false);
+type Pane = 'sidebar' | 'materials';
+const resizing = ref<Pane | null>(null);
+const paneStyle = computed(() => {
+  if (compactLayout.value) return undefined;
+  const style: Record<string, string> = {};
+  if (preferences.sidebarWidth !== null) style['--sidebar-width'] = `${preferences.sidebarWidth}px`;
+  // 窗口变窄时给对话区至少保留 440px。
+  if (preferences.materialsWidth !== null) style['--materials-width'] = `min(${preferences.materialsWidth}px, calc(100vw - var(--sidebar-width) - 440px))`;
+  return style;
+});
+function setPane(pane: Pane, width: number) {
+  const [min, max] = PANE_LIMITS[pane];
+  preferences[pane === 'sidebar' ? 'sidebarWidth' : 'materialsWidth'] = Math.round(Math.min(max, Math.max(min, width)));
+}
+function paneWidth(pane: Pane) {
+  return (pane === 'sidebar' ? sidebarElement.value : panelElement.value)?.getBoundingClientRect().width ?? PANE_LIMITS[pane][0];
+}
+function startResize(pane: Pane, event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const handle = event.currentTarget as HTMLElement;
+  handle.setPointerCapture(event.pointerId);
+  const startX = event.clientX, startWidth = paneWidth(pane);
+  resizing.value = pane;
+  const move = (next: PointerEvent) => setPane(pane, startWidth + (pane === 'sidebar' ? next.clientX - startX : startX - next.clientX));
+  const end = () => {
+    resizing.value = null;
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', end);
+    handle.removeEventListener('pointercancel', end);
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+}
+function nudgePane(pane: Pane, event: KeyboardEvent) {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  const wider = (event.key === 'ArrowRight') === (pane === 'sidebar');
+  setPane(pane, paneWidth(pane) + (wider ? 16 : -16));
+}
 const sidebarElement = ref<HTMLElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const sidebarToggleButton = ref<HTMLButtonElement | null>(null);
@@ -457,7 +511,8 @@ const paperDetail = ref<PaperDetail | null>(null);
 const selectedCitation = ref<ChatCitation | null>(null);
 const paperLoading = ref(false);
 const paperError = ref('');
-type LogItem = { kind: 'event'; id: string; event: RunEvent } | { kind: 'reader'; id: string; paperId: string; events: RunEvent[] };
+type LogEntry = { kind: 'event'; id: string; event: RunEvent } | { kind: 'reader'; id: string; paperId: string; title: string; status: string; events: RunEvent[] };
+type LogItem = { id: string; time: string; title: string; detail: string; entries: LogEntry[]; failures: number; fromUser: boolean };
 // final 表示读取时该轮已结束，记录不会再增加，展开时不再重复请求。
 interface TurnProcess { open: boolean; loaded: boolean; loading: boolean; final: boolean; error: string; items: LogItem[]; }
 const EMPTY_PROCESS: TurnProcess = { open: false, loaded: false, loading: false, final: false, error: '', items: [] };
@@ -468,23 +523,45 @@ function processState(messageId: string): TurnProcess { return processes[message
 function writableProcess(messageId: string): TurnProcess {
   return processes[messageId] || (processes[messageId] = { ...EMPTY_PROCESS, items: [] });
 }
-// 阅读子 agent 的记录按论文归组；同一篇论文再次委派时另起一组。
+// 模型的每次思考开启一步，之后的操作归到这一步下；阅读子 agent 的记录再按论文归组，同一篇论文再次委派时另起一组。
+function logItem(event: RunEvent, fromUser = false): LogItem {
+  const text = event.message.trim();
+  const title = text.split('\n')[0];
+  return { id: event.id, time: event.created_at, title, detail: title === text ? '' : text, entries: [], failures: 0, fromUser };
+}
 function logItems(events: RunEvent[]): LogItem[] {
   const items: LogItem[] = [];
-  const open = new Map<string, { kind: 'reader'; id: string; paperId: string; events: RunEvent[] }>();
+  let step: LogItem | null = null;
+  let open = new Map<string, Extract<LogEntry, { kind: 'reader' }>>();
   for (const event of events) {
+    if (event.category === 'message') { items.push(logItem(event, true)); step = null; continue; }
     const paperId = event.actor?.startsWith('reader:') ? event.actor.slice('reader:'.length) : '';
-    if (!paperId) { items.push({ kind: 'event', id: event.id, event }); continue; }
+    if (!step || (event.category === 'thought' && !paperId)) {
+      step = logItem(event);
+      items.push(step);
+      open = new Map();
+      if (!paperId) continue;
+    }
+    if (event.category === 'tool_error' || event.category === 'error') step.failures += 1;
+    if (!paperId) { step.entries.push({ kind: 'event', id: event.id, event }); continue; }
     let group = open.get(paperId);
     if (!group) {
-      group = { kind: 'reader', id: event.id, paperId, events: [] };
+      group = { kind: 'reader', id: event.id, paperId, title: event.message.match(/开始阅读「(.+)」/)?.[1] ?? paperId, status: '', events: [] };
       open.set(paperId, group);
-      items.push(group);
+      step.entries.push(group);
     }
     group.events.push(event);
-    if (event.category === 'reader' && group.events.length > 1) open.delete(paperId);
+    if (event.category === 'reader' && group.events.length > 1) {
+      group.status = event.message.match(/」(完成|未完成|失败)：/)?.[1] ?? '';
+      open.delete(paperId);
+    }
   }
   return items;
+}
+function stepMeta(item: LogItem) {
+  const count = item.entries.reduce((total, entry) => total + (entry.kind === 'reader' ? 0 : 1), 0);
+  const readers = item.entries.length - count;
+  return [readers ? `${readers} 篇论文` : '', count ? `${count} 项操作` : '', item.failures ? `${item.failures} 处失败` : ''].filter(Boolean).join('，');
 }
 const downloadBusy = ref(false);
 const downloadError = ref('');

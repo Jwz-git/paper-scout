@@ -63,6 +63,20 @@ def test_private_dns_result_is_rejected(monkeypatch):
     assert error.value.code == "unsafe_url"
 
 
+@pytest.mark.parametrize("address,allowed", [("198.18.0.95", True), ("198.19.255.1", True), ("2001:2::5f", True),
+                                             ("198.20.0.1", True), ("10.0.0.1", False), ("192.168.1.1", False),
+                                             ("169.254.169.254", False), ("::1", False)])
+def test_only_fake_ip_ranges_are_allowed_beyond_public_addresses(monkeypatch, address, allowed):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 443)),
+    ])
+    if allowed:
+        validate_pdf_url("https://arxiv.org/pdf/x")
+    else:
+        with pytest.raises(PdfError):
+            validate_pdf_url("https://arxiv.org/pdf/x")
+
+
 def test_extract_text_pages_and_blank_pages_keep_real_page_numbers():
     texts = PDFAdapter().extract_from_bytes(sample_pdf(with_text=True), "paper", "https://arxiv.org/pdf/x")
     assert [(text.page_number, text.status) for text in texts] == [(1, "ok"), (2, "not_read")]

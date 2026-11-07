@@ -6,10 +6,14 @@ export interface InterfacePreferences {
   autoScroll: boolean;
   textSize: 'small' | 'standard' | 'large';
   readingWidth: 'standard' | 'wide';
+  sidebarWidth: number | null;
+  materialsWidth: number | null;
 }
 
+export const PANE_LIMITS = { sidebar: [200, 420], materials: [320, 960] } as const;
+
 const key = 'paper-scout.preferences';
-const defaults: InterfacePreferences = { sendShortcut: 'enter', defaultMode: 'auto', autoScroll: true, textSize: 'standard', readingWidth: 'standard' };
+const defaults: InterfacePreferences = { sendShortcut: 'enter', defaultMode: 'auto', autoScroll: true, textSize: 'standard', readingWidth: 'standard', sidebarWidth: null, materialsWidth: null };
 const preferences = reactive({ ...defaults });
 const storageAvailable = ref(true);
 
@@ -27,6 +31,10 @@ if (saved.defaultMode === 'research' || saved.defaultMode === 'ask') preferences
 if (typeof saved.autoScroll === 'boolean') preferences.autoScroll = saved.autoScroll;
 if (saved.textSize === 'small' || saved.textSize === 'large') preferences.textSize = saved.textSize;
 if (saved.readingWidth === 'wide') preferences.readingWidth = saved.readingWidth;
+const paneWidth = (value: unknown, [min, max]: readonly [number, number]) =>
+  typeof value === 'number' && value >= min && value <= max ? Math.round(value) : null;
+preferences.sidebarWidth = paneWidth(saved.sidebarWidth, PANE_LIMITS.sidebar);
+preferences.materialsWidth = paneWidth(saved.materialsWidth, PANE_LIMITS.materials);
 
 function applyReadingPreferences() {
   document.documentElement.dataset.textSize = preferences.textSize;

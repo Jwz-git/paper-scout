@@ -174,7 +174,8 @@ def research(db, question=QUESTION):
             {"title": "结果", "claims": [
                 {"text": "两篇论文的成功率来自不同基准，不能直接比较。", "origin": "inference",
                  "evidence_ids": one["B / success rate"] + two["B1 / success rate"]}]}],
-            "gaps": ["缺少同一基准上的对比实验"]}]}
+            "gaps": ["缺少同一基准上的对比实验"]},
+            {"tool": "todo", "items": [{"text": t, "status": "done"} for t in ("检索候选论文", "精读并记录证据", "写报告")]}]}
 
     model = Model([
         {"thought": "先列计划，再检索", "actions": [

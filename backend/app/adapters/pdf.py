@@ -13,6 +13,8 @@ import httpx
 from backend.app.domain.models import SourceText, SourceType
 
 ALLOWED_DOMAINS = {"arxiv.org", "export.arxiv.org"}
+# 代理软件的 fake-ip DNS 把域名解析到这两个基准测试保留段，由 TUN 转发到真实地址；它们不会是本机或内网服务。
+FAKE_IP_NETWORKS = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("2001:2::/48"))
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 MAX_PAGES_LIMIT = 50
 
@@ -46,7 +48,8 @@ def _resolve_pdf_target(url: str, allowed_domains: Optional[set] = None) -> tupl
     if not addresses:
         raise PdfError("dns_error", "PDF 目标域名没有可用地址。")
     for _, _, _, _, address in addresses:
-        if not ipaddress.ip_address(address[0]).is_global:
+        ip = ipaddress.ip_address(address[0])
+        if not ip.is_global and not any(ip in network for network in FAKE_IP_NETWORKS):
             raise PdfError("unsafe_url", "PDF 目标 IP 不是公网地址，禁止访问。")
     return hostname, addresses[0][4][0]
 

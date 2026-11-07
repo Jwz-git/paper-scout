@@ -18,8 +18,8 @@ PAGE_CHARS = 8000
 FIND_CONTEXT = 400
 FIND_LIMIT = 8
 MIN_QUOTE = 8
-# 网络类失败不保存为全文缺失，之后还可以重试下载。
-TRANSIENT_PDF = {"download_timeout", "network_error", "dns_error"}
+# 这些失败不保存为全文缺失，之后还可以重试下载。unsafe_url 取决于当时的 DNS 结果，换网络或代理设置后可能恢复。
+TRANSIENT_PDF = {"download_timeout", "network_error", "dns_error", "unsafe_url"}
 REPORT_RULE = "按论文统计六类基础字段中有原文证据的数量；不代表语义已核验"
 
 
@@ -96,8 +96,13 @@ class Workspace:
         return {"paper_id": paper.id, "title": paper.title, "authors": paper.authors[:6] + (["等"] if len(paper.authors) > 6 else []),
                 "year": paper.year, "url": paper.url, "has_pdf": bool(paper.pdf_url)}
 
+    def saved_fulltext(self, paper):
+        # 旧记录里的暂时性失败不算全文状态，否则这篇论文再也不会重新下载。
+        return [s for s in self.db.get_source_texts(paper.id, self.run.id)
+                if s.source_type == SourceType.FULLTEXT and s.status not in TRANSIENT_PDF]
+
     def fulltext_status(self, paper):
-        texts = [s for s in self.db.get_source_texts(paper.id, self.run.id) if s.source_type == SourceType.FULLTEXT]
+        texts = self.saved_fulltext(paper)
         if not texts:
             return "未下载（用 read 指定页码下载）" if paper.pdf_url else "没有 PDF 地址"
         pages = [s for s in texts if s.page_number is not None]
@@ -124,16 +129,14 @@ class Workspace:
 
     async def fulltext(self, paper):
         """返回 {页码: 快照}；首次使用时下载并解析 PDF，同一时间只下载一篇。"""
-        def saved():
-            return [s for s in self.db.get_source_texts(paper.id, self.run.id) if s.source_type == SourceType.FULLTEXT]
-        texts = saved()
+        texts = self.saved_fulltext(paper)
         if not texts:
             if self.offline:
                 raise ToolError("当前是“仅用已有资料”模式，这篇论文还没有下载全文")
             if not paper.pdf_url:
                 raise ToolError("这篇论文没有可下载的 PDF 地址，只能读摘要")
             async with self.lock:
-                texts = saved()
+                texts = self.saved_fulltext(paper)
                 if not texts:
                     if self.budget.fulltexts >= self.budget.max_fulltext:
                         raise ToolError(f"本轮全文下载已达上限 {self.budget.max_fulltext} 篇")

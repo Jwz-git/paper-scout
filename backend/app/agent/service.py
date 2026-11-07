@@ -60,7 +60,7 @@ def dumps(data):
 
 def output_text(exc):
     text = {"invalid_json": "输出不是有效的 JSON 对象", "no_text": "没有输出内容", "refusal": "模型拒绝输出这一步",
-            "incomplete": "输出被截断，超过了模型的输出长度上限；减少这一步的内容，例如分几次 note、缩短 report"}[exc.code]
+            "incomplete": "输出没有完成，通常是超过了输出长度上限；减少这一步的内容，例如分几次 note、缩短 report"}[exc.code]
     return text + (f"（{exc.diagnostic}）" if exc.diagnostic else "")
 
 
@@ -197,7 +197,7 @@ class Turn:
         self.db, self.store, self.llm = service.db, service.store, service.llm
         self.row = row
         self.clock = time.monotonic()
-        self.wrapping, self.limited, self.invalid = False, None, 0
+        self.wrapping, self.limited, self.invalid, self.reminded = False, None, 0, False
         self.fulltexts, self.max_fulltext = 0, LIMITS["fulltexts"]
         self.run = self.db.agent_run(row["task_id"])
         self.usage = self.store.usage(row["task_id"])
@@ -330,6 +330,13 @@ class Turn:
             extra["notices"] = ["预算即将用完：不要再开始新的检索或精读，用已有证据写报告（需要时）并 reply。"]
         self.transcript.add(step, results, extra)
 
+    def unfinished_todos(self):
+        """回复前提醒一次未完成的计划项；预算快用完时不提醒，避免把收尾挤掉。"""
+        budget = self.budget()
+        if self.reminded or budget["steps_left"] <= 3 or budget["calls_left"] <= 12 or budget["seconds_left"] <= 300:
+            return []
+        return [item.text for item in self.work.todos if item.status != "done"]
+
     async def loop(self):
         while True:
             self.absorb()
@@ -353,6 +360,13 @@ class Turn:
                 self.event("thought", step.thought)
             action = step.actions[0]
             if action.tool == "reply":
+                unfinished = self.unfinished_todos()
+                if unfinished:
+                    self.reminded = True
+                    self.event("tool_error", f"计划清单还有 {len(unfinished)} 项未完成，回复前先处理")
+                    self.record(step, [{"tool": "reply", "ok": False, "error": "计划清单还有未完成的项：" + "；".join(unfinished)
+                                        + "。先完成它们；确实不做的项用 todo 标为 done，并在回复中说明没做的原因，然后再 reply。"}])
+                    continue
                 try:
                     return action.content, self.workspace.citations(action.evidence_ids)
                 except ToolError as exc:

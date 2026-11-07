@@ -58,7 +58,7 @@ def test_research_turn_runs_tools_and_saves_counted_progress(db):
     # 5 次模型调用 + 1 次检索 + 1 次全文下载；只下载了要读全文的那一篇。
     assert (work.steps, work.model_calls, work.calls) == (5, 5, 7) and work.activity is None
     assert service.pdf.calls == [paper(0).id] and len(service.arxiv.queries) == 1
-    assert [t.status for t in work.todos] == ["in_progress", "pending", "pending"]
+    assert [t.status for t in work.todos] == ["done", "done", "done"]
     usage = service.store.usage(task_id)
     assert usage.model_calls == 5 and usage.token_usage["total_tokens"] == 35
     assert (run.total_calls, run.model_calls, run.token_usage["total_tokens"]) == (7, 5, 35)
@@ -82,6 +82,16 @@ def test_each_message_gets_a_fresh_budget_while_conversation_usage_accumulates(d
     opening = observation(service.llm.calls()[0])
     assert [m["role"] for m in opening["conversation"]] == ["user", "assistant"]
     assert opening["workspace"]["counts"]["included"] == 2 and opening["workspace"]["latest_report"]
+
+
+def test_reply_with_unfinished_plan_is_sent_back_once(db):
+    plan = {"actions": [{"tool": "todo", "items": [{"text": "检索", "status": "done"}, {"text": "精读全文", "status": "pending"}]}]}
+    service = service_with(db, [plan, reply("先到这里。"), reply("没有精读：用户只要概览。")])
+    task_id = send(service, "调研")
+    final = answer(service.store, task_id)
+    assert final.content == "没有精读：用户只要概览。" and final.work.steps == 3
+    result = observation(service.llm.calls()[2])["results"][0]
+    assert result["ok"] is False and "精读全文" in result["error"]
 
 
 def test_without_a_model_the_message_fails_with_a_setup_hint(db):
@@ -194,6 +204,18 @@ def test_report_rejects_unknown_or_excluded_evidence_and_includes_cited_papers(d
         with pytest.raises(ToolError, match="不存在"):
             ws.citations(["ev_invented"])
         assert [c.evidence_id for c in ws.citations(ids[second])] == ids[second]
+    asyncio.run(scenario())
+
+
+def test_failed_address_check_saved_earlier_does_not_block_a_new_download(db):
+    async def scenario():
+        pdf = Pdf()
+        ws = await open_workspace(db, pdf)
+        stale = SourceText(id="src_stale", paper_id=paper(0).id, source_type=SourceType.FULLTEXT, content="", status="unsafe_url")
+        db.save_source_texts([stale], ws.run.id)
+        assert "未下载" in ws.fulltext_status(paper(0))
+        _, data = await ws.read(Read(tool="read", paper_id=paper(0).id, pages=[1]))
+        assert data["pages"][0]["page"] == 1 and pdf.calls == [paper(0).id]
     asyncio.run(scenario())
 
 

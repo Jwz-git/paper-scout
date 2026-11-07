@@ -118,7 +118,7 @@ ReaderAction = Annotated[Union[Read, Find, Note, Done], Field(discriminator="too
 
 
 class MainStep(Action):
-    thought: str = Field(default="", max_length=1000)
+    thought: str = Field(default="", max_length=3000)
     actions: List[MainAction] = Field(min_length=1, max_length=6)
 
     @model_validator(mode="after")
@@ -129,7 +129,7 @@ class MainStep(Action):
 
 
 class ReaderStep(Action):
-    thought: str = Field(default="", max_length=1000)
+    thought: str = Field(default="", max_length=3000)
     actions: List[ReaderAction] = Field(min_length=1, max_length=6)
 
     @model_validator(mode="after")
