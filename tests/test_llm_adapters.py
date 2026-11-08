@@ -292,6 +292,20 @@ def test_service_failures_have_safe_explicit_codes(status, code):
     asyncio.run(run())
 
 
+def test_slow_response_is_a_timeout_after_the_whole_request_limit():
+    async def slow(request):
+        await asyncio.sleep(1)
+        return httpx.Response(200, json=payload_for(OpenAIChatAdapter, '{"a": 1}'))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as client:
+            adapter = OpenAIChatAdapter("https://model.test/v1", "m", client=client, timeout_seconds=0.05)
+            with pytest.raises(LLMError) as error:
+                await adapter.generate(MESSAGES)
+            assert error.value.code == "timeout"
+    asyncio.run(run())
+
+
 def test_unsupported_json_mode_is_rejected_before_network_request():
     def handler(request):
         pytest.fail("无效模式不得发起请求")

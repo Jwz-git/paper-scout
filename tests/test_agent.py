@@ -65,6 +65,7 @@ def test_research_turn_runs_tools_and_saves_counted_progress(db):
     report = db.get_report(run.id)
     assert report.id == work.report_id and [s.title for s in report.document.sections] == ["方法", "结果"]
     assert any("未读取全文" in gap for gap in report.gaps)
+    assert any("全文 3 页中完整读过 2 页" in gap for gap in report.gaps)
     assert report.document.assessment.comparisons[0].status == "not_comparable"
     assert {e.turn_id for e in events(db, task_id)} == {final.id}
     assert {"thought", "tool"} <= {e.category for e in events(db, task_id)}
@@ -573,11 +574,12 @@ def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monke
     assert "conversation" not in opening
 
 
-@pytest.mark.parametrize("error, shown", [
-    (LLMError("refusal", "filtered", diagnostic="status=incomplete，reason=content_filter"), "content_filter"),
-    (LLMError("server_error", "HTTP 502"), "server_error"),
+@pytest.mark.parametrize("error, shown, attempts", [
+    (LLMError("refusal", "filtered", diagnostic="status=incomplete，reason=content_filter"), "content_filter", 3),
+    (LLMError("server_error", "HTTP 502"), "server_error", 3),
+    (LLMError("http_error", "HTTP 400"), "http_error", 1),
 ])
-def test_reader_failing_after_retries_ends_that_reader_without_losing_other_results(db, monkeypatch, error, shown):
+def test_reader_model_failure_ends_that_reader_without_losing_other_results(db, monkeypatch, error, shown, attempts):
     monkeypatch.setattr(agent, "RETRY_DELAYS", (0, 0))
     papers, delegated = [paper(0), paper(1)], {}
 
@@ -586,7 +588,7 @@ def test_reader_failing_after_retries_ends_that_reader_without_losing_other_resu
         return reply("第一篇阅读失败，第二篇已记录。")
 
     model = Model([search_step(2), delegate_step(papers), summarize], readers={
-        papers[0].id: [error] * 3,
+        papers[0].id: [error] * attempts,
         papers[1].id: reader(papers[1].id, 1),
     })
     service = AgentService(db, model, arxiv=Search(papers), pdf=Pdf())
@@ -594,7 +596,7 @@ def test_reader_failing_after_retries_ends_that_reader_without_losing_other_resu
     outcomes = delegated["data"]["results"]
     assert [o["status"] for o in outcomes] == ["failed", "done"]
     assert shown in outcomes[0]["summary"] and outcomes[1]["evidence"]
-    assert len(model.calls("reader:" + papers[0].id)) == 3
+    assert len(model.calls("reader:" + papers[0].id)) == attempts
     assert answer(service.store, task_id).status == "completed"
 
 

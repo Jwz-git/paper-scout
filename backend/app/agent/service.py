@@ -548,9 +548,8 @@ class Reader:
                 self.transcript.retry = (exc.raw, str(exc))
                 continue
             except AgentFailure as exc:
-                if exc.code not in TRANSIENT:
-                    raise
-                return self.result("failed", f"模型调用重试后仍失败（{exc.code}）" + (f"：{exc.detail}" if exc.detail else ""))
+                # 鉴权等全局错误会在主 agent 下一次调用时使本轮失败；这里只结束本篇，保留其他子任务结果。
+                return self.result("failed", f"模型调用失败（{exc.code}）" + (f"：{exc.detail}" if exc.detail else ""))
             except LimitReached as exc:
                 turn.limited = turn.limited or str(exc)
                 return self.result("incomplete", str(exc))

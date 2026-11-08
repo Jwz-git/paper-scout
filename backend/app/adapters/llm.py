@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
@@ -68,13 +69,16 @@ class BaseLLMAdapter(ABC):
         self.timeout_seconds = timeout_seconds
         self._client = client
 
+    async def _send(self, url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> httpx.Response:
+        if self._client is not None:
+            return await self._client.post(url, json=payload, headers=headers, timeout=self.timeout_seconds)
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            return await client.post(url, json=payload, headers=headers)
+
     async def _post_json(self, url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> dict:
         try:
-            if self._client is not None:
-                response = await self._client.post(url, json=payload, headers=headers, timeout=self.timeout_seconds)
-            else:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                    response = await client.post(url, json=payload, headers=headers)
+            # httpx 的超时按连接、发送和相邻两次收包分别计时，持续慢速返回不会触发；这里限制整次请求。
+            response = await asyncio.wait_for(self._send(url, headers, payload), self.timeout_seconds)
             if response.status_code == 401:
                 raise LLMError("authentication_failed", "模型服务鉴权失败，请检查凭据。")
             if response.status_code == 429:
@@ -84,7 +88,7 @@ class BaseLLMAdapter(ABC):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise LLMError("http_error", f"模型服务失败，HTTP {exc.response.status_code}。") from exc
-        except httpx.TimeoutException as exc:
+        except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
             raise LLMError("timeout", "模型请求超时。") from exc
         except httpx.RequestError as exc:
             raise LLMError("network_error", "模型服务网络请求失败。") from exc

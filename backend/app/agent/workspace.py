@@ -56,6 +56,15 @@ def read_summary(analysis):
     return "；".join(labels) or "未读"
 
 
+def fully_read(source, ranges):
+    end = 0
+    for r in sorted((r for r in ranges if r.source_text_id == source.id), key=lambda r: r.location_start):
+        if r.location_start > end:
+            break
+        end = max(end, r.location_end)
+    return end >= len(source.content)
+
+
 def mixed_operators(query):
     """同一层括号里同时出现 AND 与 OR 时，arXiv 没有说明结合顺序，检索结果不可预期。"""
     groups = [set()]
@@ -409,6 +418,12 @@ class Workspace:
                 gaps.append(f"{short(paper.title)}：尚未阅读，只有检索元数据")
             elif not any(r.source_type == SourceType.FULLTEXT for r in analysis.ranges):
                 gaps.append(f"{short(paper.title)}：未读取全文，当前最多基于摘要")
+            else:
+                pages = [s for s in self.saved_fulltext(paper) if s.status == "ok" and s.page_number is not None]
+                whole = [s.page_number for s in pages if fully_read(s, analysis.ranges)]
+                if len(whole) < len(pages):
+                    gaps.append(f"{short(paper.title)}：全文 {len(pages)} 页中完整读过 {len(whole)} 页"
+                                + (f"（第 {pages_label(whole)} 页）" if whole else "") + "，其余只看过 find 片段或未读")
         counts = {p.id: [len({f.field_name for f in (by_paper[p.id].fields if p.id in by_paper else [])
                               if f.field_name in FIELD_LABELS and f.value and f.evidence_ids}), len(FIELD_LABELS)] for p in included}
         assessment = Assessment(id=uuid4().hex, run_id=self.run.id, round_number=self.run.current_round,

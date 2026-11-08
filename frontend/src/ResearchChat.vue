@@ -136,7 +136,7 @@
                                     <li v-if="logEntry.kind === 'event'"><span>{{ eventLabels[logEntry.event.category] || logEntry.event.category }}</span><time :datetime="logEntry.event.created_at">{{ clockTime(logEntry.event.created_at) }}</time><p>{{ logEntry.event.message }}</p></li>
                                     <li v-else class="reader-group">
                                       <details class="process-fold">
-                                        <summary><UiIcon name="chevronRight" /><span class="fold-title">{{ logEntry.title }}</span><small :class="{ failed: logEntry.status === '失败' }">{{ logEntry.status || '阅读中' }}</small></summary>
+                                        <summary><UiIcon name="chevronRight" /><span class="fold-title">{{ logEntry.title }}</span><small :class="{ failed: logEntry.status === '失败' }">{{ logEntry.status || (entry.message.status === 'processing' ? '阅读中' : entry.message.work.continued ? '见下一条回复' : '已中止') }}</small></summary>
                                         <ol class="event-list">
                                           <li v-for="event in logEntry.events" :key="event.id"><span>{{ eventLabels[event.category] || event.category }}</span><time :datetime="event.created_at">{{ clockTime(event.created_at) }}</time><p>{{ event.message }}</p></li>
                                         </ol>
@@ -160,7 +160,7 @@
                     </template>
                     <p v-else-if="!entry.message.work" class="processing-placeholder" role="status"><span v-if="['queued', 'processing'].includes(entry.message.status)" class="processing-indicator" aria-hidden="true"></span>{{ messageLabels[entry.message.status] }}…</p>
                     <span v-if="entry.message.content && entry.message.status !== 'completed'" class="message-status" :class="entry.message.status">{{ messageLabels[entry.message.status] }}</span>
-                    <p v-if="entry.message.error_category" class="error-message" role="alert">错误类别：{{ entry.message.error_category }}</p>
+                    <p v-if="entry.message.error_category && entry.message.error_category !== 'user_cancelled'" class="error-message" role="alert">错误类别：{{ entry.message.error_category }}</p>
                     <div v-if="entry.message.citations.length" class="citation-buttons" aria-label="回答引用">
                       <button v-for="(citation, index) in entry.message.citations" :key="`${citation.source_text_id}-${index}`" :aria-label="`引用 ${index + 1}：${sourceLabels[citation.source_type]}${citation.page_number != null ? `，PDF 第 ${citation.page_number} 页` : ''}`" :title="citation.quote" @click="openCitation(citation)">
                         <span>[{{ index + 1 }}]</span>{{ sourceLabels[citation.source_type] }}{{ citation.page_number != null ? ` · p${citation.page_number}` : '' }}<UiIcon name="arrowUpRight" />
