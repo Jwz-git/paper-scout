@@ -20,7 +20,7 @@ from backend.app.domain.models import Event, utc_now
 from backend.app.storage.conversations import ConversationStore
 
 # 每轮（一条用户消息及执行中并入的消息）的执行上限；阅读子 agent 共用同一份预算。
-LIMITS = {"steps": 30, "calls": 150, "seconds": 1800, "fulltexts": 10, "readers": 3, "reader_steps": 8}
+LIMITS = {"steps": 30, "calls": 150, "seconds": 3600, "fulltexts": 10, "readers": 3, "reader_steps": 12}
 # 达到上限后留给收尾回复的额度。
 FINAL_CALLS, FINAL_SECONDS = 2, 150
 RETRY_DELAYS = (2.0, 5.0)
