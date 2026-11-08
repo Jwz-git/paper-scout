@@ -15,7 +15,8 @@ from backend.app.domain.models import SourceText, SourceType
 ALLOWED_DOMAINS = {"arxiv.org", "export.arxiv.org"}
 # 代理软件的 fake-ip DNS 把域名解析到这两个基准测试保留段，由 TUN 转发到真实地址；它们不会是本机或内网服务。
 FAKE_IP_NETWORKS = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("2001:2::/48"))
-MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+# 图片多的 arXiv 论文常超过 25MB（实测 2404.17845v1 为 35MB）；解析另有页数和子进程时限。
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 MAX_PAGES_LIMIT = 50
 
 

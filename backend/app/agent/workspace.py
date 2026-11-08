@@ -56,6 +56,20 @@ def read_summary(analysis):
     return "；".join(labels) or "未读"
 
 
+def mixed_operators(query):
+    """同一层括号里同时出现 AND 与 OR 时，arXiv 没有说明结合顺序，检索结果不可预期。"""
+    groups = [set()]
+    for token in re.findall(r'"[^"]*"|[()]|[^\s()"]+', query):
+        if token == "(":
+            groups.append(set())
+        elif token == ")" and len(groups) > 1:
+            if len(groups.pop()) > 1:
+                return True
+        elif token in ("AND", "OR", "ANDNOT"):
+            groups[-1].add(token == "OR")
+    return any(len(g) > 1 for g in groups)
+
+
 class Workspace:
     def __init__(self, db, run, arxiv, pdf, budget, lock, offline=False):
         self.db, self.run, self.arxiv, self.pdf = db, run, arxiv, pdf
@@ -162,6 +176,8 @@ class Workspace:
         if self.offline:
             raise ToolError("当前是“仅用已有资料”模式，不能检索")
         query = action.query
+        if mixed_operators(query):
+            raise ToolError("同一层里混用了 AND 和 OR，arXiv 的结合顺序不确定；用括号写清分组，如 (A OR B) AND C")
         if action.start_year is not None or action.end_year is not None:
             start, end = action.start_year or 1800, action.end_year or utc_now().year
             if start > end:

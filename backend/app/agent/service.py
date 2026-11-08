@@ -23,10 +23,15 @@ from backend.app.storage.conversations import ConversationStore
 LIMITS = {"steps": 30, "calls": 150, "seconds": 1800, "fulltexts": 10, "readers": 3, "reader_steps": 8}
 # 达到上限后留给收尾回复的额度。
 FINAL_CALLS, FINAL_SECONDS = 2, 150
+# 所用网关在多个模型请求同时进行时频繁返回 5xx，单个请求正常；子 agent 并行，但模型请求排队。
+MODEL_CONCURRENCY = 1
 RETRY_DELAYS = (2.0, 5.0)
-TRANSIENT = {"rate_limited", "timeout", "network_error", "server_error"}
-OUTPUT_ERRORS = {"invalid_json", "incomplete", "no_text", "refusal"}
+# 所用网关的内容过滤实测不稳定（同一篇论文时拒时过），按暂时错误有限重试。
+TRANSIENT = {"rate_limited", "timeout", "network_error", "server_error", "refusal"}
+OUTPUT_ERRORS = {"invalid_json", "incomplete", "no_text"}
 MAX_INVALID = 3
+# 这些字段由代码回传给模型；长上下文里模型偶尔把它们续写进自己的输出，丢弃后再校验。
+OBSERVATION_KEYS = {"results", "budget", "notices", "new_messages", "steps_left", "output_error", "final"}
 # 一步内返回给模型的原文上限（字符）；整份上下文超过 cap 时压缩较早的步骤。
 STEP_TEXT = 40000
 HISTORY_MESSAGES, HISTORY_CHARS, MESSAGE_CHARS = 20, 24000, 4000
@@ -41,7 +46,7 @@ class LimitReached(Exception):
 
 
 class AgentFailure(Exception):
-    """本轮无法继续：模型服务失败或输出持续无效。"""
+    """本轮无法继续：模型服务失败。"""
 
     def __init__(self, code, detail=None):
         super().__init__(code)
@@ -59,8 +64,8 @@ def dumps(data):
 
 
 def output_text(exc):
-    text = {"invalid_json": "输出不是有效的 JSON 对象", "no_text": "没有输出内容", "refusal": "模型拒绝输出这一步",
-            "incomplete": "输出没有完成，通常是超过了输出长度上限；减少这一步的内容，例如分几次 note、缩短 report"}[exc.code]
+    text = {"invalid_json": "输出不是有效的 JSON 对象", "no_text": "没有输出内容",
+            "incomplete": "输出没有完成；不能当作完整结果，原因见诊断"}[exc.code]
     return text + (f"（{exc.diagnostic}）" if exc.diagnostic else "")
 
 
@@ -199,6 +204,7 @@ class Turn:
         self.clock = time.monotonic()
         self.wrapping, self.limited, self.invalid, self.reminded = False, None, 0, False
         self.fulltexts, self.max_fulltext = 0, LIMITS["fulltexts"]
+        self.model_gate = asyncio.Semaphore(MODEL_CONCURRENCY)
         self.run = self.db.agent_run(row["task_id"])
         self.usage = self.store.usage(row["task_id"])
         self.base = (self.usage.model_calls, self.usage.total_execution_seconds,
@@ -256,25 +262,27 @@ class Turn:
         self.save()
 
     async def generate(self, messages):
-        await self.external()
-        self.work.model_calls += 1
-        usage = None
-        for tokens in self.tokens:
-            tokens.begin()
-        try:
-            response = await asyncio.wait_for(self.llm.generate(messages, response_format="json_object"),
-                                              timeout=max(1.0, self.limit("seconds") - self.elapsed()))
-            usage = response.usage
-            return response
-        except asyncio.TimeoutError:
-            raise LimitReached("达到本轮执行时间上限") from None
-        except LLMError as exc:
-            usage = exc.usage
-            raise
-        finally:
+        # 排到之后才计数和计时：排队中被停止的请求没有发出。
+        async with self.model_gate:
+            await self.external()
+            self.work.model_calls += 1
+            usage = None
             for tokens in self.tokens:
-                tokens.end(usage)
-            self.save()
+                tokens.begin()
+            try:
+                response = await asyncio.wait_for(self.llm.generate(messages, response_format="json_object"),
+                                                  timeout=max(1.0, self.limit("seconds") - self.elapsed()))
+                usage = response.usage
+                return response
+            except asyncio.TimeoutError:
+                raise LimitReached("达到本轮执行时间上限") from None
+            except LLMError as exc:
+                usage = exc.usage
+                raise
+            finally:
+                for tokens in self.tokens:
+                    tokens.end(usage)
+                self.save()
 
     async def model(self, messages, schema, actor):
         """一次模型决策：暂时性服务错误有限重试；输出格式问题交回调用方，让模型改正。"""
@@ -287,10 +295,11 @@ class Turn:
                     raise InvalidOutput(output_text(exc)) from None
                 if exc.code not in TRANSIENT or attempt == len(RETRY_DELAYS):
                     raise AgentFailure(exc.code, exc.diagnostic) from None
-                self.event("retry", f"模型服务暂时不可用（{exc.code}），{RETRY_DELAYS[attempt]:g} 秒后重试", actor)
+                self.event("retry", f"模型调用失败（{exc.code}），{RETRY_DELAYS[attempt]:g} 秒后重试", actor)
                 await asyncio.sleep(RETRY_DELAYS[attempt])
+        data = {k: v for k, v in response.parsed_json.items() if k not in OBSERVATION_KEYS}
         try:
-            return schema.model_validate(response.parsed_json)
+            return schema.model_validate(data)
         except ValidationError as exc:
             raise InvalidOutput(validation_text(exc), response.content) from None
 
@@ -349,33 +358,35 @@ class Turn:
             except InvalidOutput as exc:
                 self.invalid += 1
                 self.event("error", f"模型输出无效（连续第 {self.invalid} 次）：{short(str(exc), 200)}")
-                if self.invalid >= MAX_INVALID:
-                    raise AgentFailure("invalid_output", f"模型连续 {MAX_INVALID} 次输出不符合格式：{exc}") from None
                 self.transcript.retry = (exc.raw, str(exc))
+                if self.invalid >= MAX_INVALID:
+                    return await self.wrap_up(f"模型连续 {MAX_INVALID} 次输出不符合格式")
                 continue
             except LimitReached as exc:
                 return await self.wrap_up(str(exc))
             self.transcript.retry, self.invalid = None, 0
             if step.thought:
                 self.event("thought", step.thought)
-            action = step.actions[0]
-            if action.tool == "reply":
-                unfinished = self.unfinished_todos()
-                if unfinished:
-                    self.reminded = True
-                    self.event("tool_error", f"计划清单还有 {len(unfinished)} 项未完成，回复前先处理")
-                    self.record(step, [{"tool": "reply", "ok": False, "error": "计划清单还有未完成的项：" + "；".join(unfinished)
-                                        + "。先完成它们；确实不做的项用 todo 标为 done，并在回复中说明没做的原因，然后再 reply。"}])
-                    continue
+            action = step.actions[-1]
+            replying = action.tool == "reply"
+            results = await self.execute(step.actions[:-1] if replying else step.actions)
+            if self.limited:
+                self.record(step, results)
+                return await self.wrap_up(self.limited)
+            if replying:
                 try:
+                    if any(not result["ok"] for result in results):
+                        raise ToolError("前面的动作失败，reply 未执行；根据工具结果改正后再回复。")
+                    unfinished = self.unfinished_todos()
+                    if unfinished:
+                        self.reminded = True
+                        raise ToolError("计划清单还有未完成的项：" + "；".join(unfinished)
+                                        + "。先完成它们；确实不做的项用 todo 标为 done，并在回复中说明没做的原因，然后再 reply。")
                     return action.content, self.workspace.citations(action.evidence_ids)
                 except ToolError as exc:
-                    self.event("tool_error", f"回复中的引用无效：{exc}")
-                    self.record(step, [{"tool": "reply", "ok": False, "error": str(exc)}])
-                    continue
-            self.record(step, await self.execute(step.actions))
-            if self.limited:
-                return await self.wrap_up(self.limited)
+                    self.event("tool_error", f"回复未执行：{exc}")
+                    results.append({"tool": "reply", "ok": False, "error": str(exc)})
+            self.record(step, results)
 
     async def execute(self, actions, actor="agent", allowed=None):
         results, room = [], STEP_TEXT
@@ -486,7 +497,14 @@ class Turn:
         except AgentFailure as exc:
             self.close()
             detail = (exc.detail + "\n") if exc.detail else ""
-            self.store.finish(self.row, error=exc.code, diagnostic=detail + "已保存的论文、阅读记录和发现仍在，可以稍后发送“继续”。")
+            if self.work.report_id:
+                detail += "本轮报告已保存，可以在「资料与报告 → 研究报告」查看；回复失败不影响已保存的报告。\n"
+            counts = self.workspace.overview()["counts"]
+            if counts["candidates"] or counts["included"] or counts["excluded"] or counts["evidence"]:
+                detail += "已保存的论文、阅读记录和发现仍在，可以稍后发送“继续”。"
+            else:
+                detail += "工作区还没有保存任何资料，可以稍后重新发送这条消息。"
+            self.store.finish(self.row, error=exc.code, diagnostic=detail)
         except asyncio.CancelledError:
             self.close()
             self.store.finish(self.row, error="process_interrupted", interrupted=True)
@@ -529,6 +547,10 @@ class Reader:
                     return self.result("failed", f"模型连续 {MAX_INVALID} 次输出不符合格式")
                 self.transcript.retry = (exc.raw, str(exc))
                 continue
+            except AgentFailure as exc:
+                if exc.code not in TRANSIENT:
+                    raise
+                return self.result("failed", f"模型调用重试后仍失败（{exc.code}）" + (f"：{exc.detail}" if exc.detail else ""))
             except LimitReached as exc:
                 turn.limited = turn.limited or str(exc)
                 return self.result("incomplete", str(exc))

@@ -55,8 +55,12 @@ def _usage(data: Optional[dict], input_key: str, output_key: str, *, include_cac
     return usage
 
 
+# 阅读子 agent 累积多页全文后，单次响应实测接近或超过 60 秒。
+MODEL_TIMEOUT_SECONDS = 180.0
+
+
 class BaseLLMAdapter(ABC):
-    def __init__(self, base_url: str, model: str, api_key: str = "", timeout_seconds: float = 60.0,
+    def __init__(self, base_url: str, model: str, api_key: str = "", timeout_seconds: float = MODEL_TIMEOUT_SECONDS,
                  client: Optional[httpx.AsyncClient] = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -119,7 +123,9 @@ class BaseLLMAdapter(ABC):
             except json.JSONDecodeError as exc:
                 diagnostic = ("响应不是单个完整的JSON代码块；不接受其他语言标记、缺失的围栏或块外文字。"
                               if content.lstrip().startswith("```") and fence is None
-                              else f"JSON正文语法错误：第{exc.lineno}行，第{exc.colno}列（共{len(json_text)}字符）。")
+                              else f"JSON正文语法错误：第{exc.lineno}行，第{exc.colno}列（共{len(json_text)}字符）。"
+                                   "检查字符串转义：Markdown/LaTeX 中的反斜杠要写成双反斜杠，英文双引号和换行也要转义；"
+                                   "可以改用不含公式的简短文本，但仍须输出完整 JSON 对象。")
                 raise LLMError("invalid_json", "模型结构化输出不是有效 JSON 对象。",
                                usage=usage, diagnostic=diagnostic) from exc
             if not isinstance(parsed_json, dict):
@@ -186,10 +192,22 @@ class OpenAIResponsesAdapter(BaseLLMAdapter):
 
     def _parse_response(self, data: dict, response_format: Optional[str]) -> LLMResponse:
         usage = _usage(data.get("usage"), "input_tokens", "output_tokens")
-        if data.get("status") in ("incomplete", "failed", "cancelled", "queued", "in_progress"):
-            reason = (data.get("incomplete_details") or {}).get("reason")
-            raise LLMError("incomplete", "模型响应未完成，不能用作完整结果。", usage=usage,
-                           diagnostic=f"status={data['status']}" + (f"，reason={reason}" if reason else ""))
+        status = data.get("status")
+        if status in ("incomplete", "failed", "cancelled", "queued", "in_progress"):
+            details = data.get("incomplete_details")
+            reason = details.get("reason") if isinstance(details, dict) else None
+            # 只展示协议枚举，不把网关的任意错误正文放进事件或模型上下文。
+            known_reason = reason if isinstance(reason, str) and reason in (
+                "max_output_tokens", "max_messages", "content_filter", "steered"
+            ) else "unknown"
+            diagnostic = f"status={status}，reason={known_reason}"
+            if status == "incomplete" and known_reason == "content_filter":
+                raise LLMError("refusal", "服务返回内容过滤，不能用作完整结果。", usage=usage,
+                               diagnostic=diagnostic + "；服务返回内容过滤。")
+            if known_reason == "max_output_tokens":
+                diagnostic += "；达到输出长度上限，减少这一步的内容，例如分几次 note、缩短 report。"
+            raise LLMError("incomplete" if status == "incomplete" else "response_not_completed",
+                           "模型响应未完成，不能用作完整结果。", usage=usage, diagnostic=diagnostic)
         parts, structured = [], None
         for item in data.get("output", []):
             if item["type"] == "message":
@@ -246,7 +264,8 @@ class AnthropicMessagesAdapter(BaseLLMAdapter):
         return self._response(content, usage, response_format)
 
 
-def create_llm_adapter(protocol: str, base_url: str, model: str, api_key: str = "", timeout_seconds: float = 60.0,
+def create_llm_adapter(protocol: str, base_url: str, model: str, api_key: str = "",
+                       timeout_seconds: float = MODEL_TIMEOUT_SECONDS,
                        client: Optional[httpx.AsyncClient] = None) -> BaseLLMAdapter:
     adapters = {"openai_chat": OpenAIChatAdapter, "openai_responses": OpenAIResponsesAdapter,
                 "anthropic_messages": AnthropicMessagesAdapter}

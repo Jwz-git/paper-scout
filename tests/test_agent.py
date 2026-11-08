@@ -94,6 +94,37 @@ def test_reply_with_unfinished_plan_is_sent_back_once(db):
     assert result["ok"] is False and "精读全文" in result["error"]
 
 
+def test_todo_and_reply_can_complete_in_the_same_step(db):
+    step = {"actions": [
+        {"tool": "todo", "items": [{"text": "核对资料", "status": "done"}]},
+        {"tool": "reply", "content": "核对完成。"},
+    ]}
+    service = service_with(db, [step])
+    task_id = send(service, "核对资料")
+    final = answer(service.store, task_id)
+    assert final.status == "completed" and final.content == "核对完成。"
+    assert final.work.steps == 1 and final.work.todos[0].status == "done"
+    assert any(e.category == "tool" and "更新计划" in e.message for e in events(db, task_id))
+
+
+def test_failed_tool_before_reply_is_returned_to_model_without_ending_turn(db):
+    step = {"actions": [{"tool": "workspace", "paper_id": "missing"}, {"tool": "reply", "content": "错误的成功回复。"}]}
+    service = service_with(db, [step, reply("没有这篇论文，尚未核对。")])
+    task_id = send(service, "核对")
+    observed = observation(service.llm.calls()[1])["results"]
+    assert [r["tool"] for r in observed] == ["workspace", "reply"]
+    assert all(not r["ok"] for r in observed) and "前面的动作失败" in observed[1]["error"]
+    assert answer(service.store, task_id).content == "没有这篇论文，尚未核对。"
+
+
+def test_reply_before_other_actions_is_rejected_without_executing_them(db):
+    step = {"actions": [{"tool": "reply", "content": "结束。"}, {"tool": "search", "query": "all:agents"}]}
+    service = service_with(db, [step, reply("格式已改正。")])
+    task_id = send(service, "测试")
+    assert "最后一个动作" in observation(service.llm.calls()[1])["output_error"]
+    assert service.arxiv.queries == [] and answer(service.store, task_id).content == "格式已改正。"
+
+
 def test_without_a_model_the_message_fails_with_a_setup_hint(db):
     service = AgentService(db, None, arxiv=Search([]), pdf=Pdf())
     task_id = send(service, "调研")
@@ -280,18 +311,63 @@ def test_invalid_output_goes_back_to_the_model_with_the_reason(db, bad):
     assert any(e.category == "error" for e in events(db, task_id))
 
 
-def test_three_invalid_outputs_in_a_row_fail_the_turn_but_keep_the_workspace(db):
-    service = service_with(db, [{"actions": []}] * 3)
+@pytest.mark.parametrize("query, rejected", [
+    ('abs:"Text2Loc" OR abs:"KITTI360" AND abs:text', True),
+    ('(ti:a OR ti:b AND ti:c) AND abs:d', True),
+    ('(abs:"Text2Loc" OR abs:"KITTI360") AND abs:text', False),
+    ('abs:"coarse and fine" AND ti:x', False),
+])
+def test_search_with_ambiguous_and_or_grouping_is_returned_before_calling_arxiv(db, query, rejected):
+    service = service_with(db, [{"actions": [{"tool": "search", "query": query}]}, reply("好。")], papers=[paper(0)])
+    send(service, "调研")
+    result = results(service.llm.calls()[1], "search")[0]
+    assert result["ok"] is not rejected
+    assert len(service.arxiv.queries) == (0 if rejected else 1)
+
+
+def test_observation_fields_echoed_by_the_model_are_dropped_and_the_actions_still_run(db):
+    step = dict(reply("好的。"), results=[{"tool": "search", "ok": True}], budget={"steps_left": 1})
+    service = service_with(db, [step])
+    final = answer(service.store, send(service, "你好"))
+    assert final.status == "completed" and final.content == "好的。" and len(service.llm.requests) == 1
+
+
+def test_three_invalid_outputs_in_a_row_wrap_up_instead_of_discarding_the_turn(db):
+    service = service_with(db, [{"actions": []}] * 3 + [reply("已整理现有资料。")])
     task_id = send(service, "你好")
     final = answer(service.store, task_id)
-    assert final.status == "failed" and final.error_category == "invalid_output"
-    assert "可以稍后发送“继续”" in final.content and len(service.llm.requests) == 3
+    assert final.status == "completed" and final.content == "已整理现有资料。"
+    assert final.work.stop_reason == "模型连续 3 次输出不符合格式" and len(service.llm.requests) == 4
+    assert observation(service.llm.calls()[3])["final"].startswith("模型连续 3 次输出不符合格式")
+
+
+@pytest.mark.parametrize("combined", [True, False])
+def test_report_is_saved_with_combined_reply_or_reported_after_the_reply_fails(db, combined):
+    service, task_id, _ = research(db)
+    run = db.agent_run(task_id)
+    evidence = db.run_evidence(run.id)[0].id
+    report = {"tool": "report", "title": "续接报告", "question": "补充", "sections": [
+        {"title": "发现", "claims": [{"text": "已记录的方法", "origin": "author", "evidence_ids": [evidence]}]}]}
+    service.llm = Model([
+        {"actions": [report, {"tool": "reply", "content": "报告已保存。", "evidence_ids": [evidence]}]},
+    ] if combined else [{"actions": [report]}] + [{"actions": []}] * 5)
+    send(service, "继续", task_id)
+    final = answer(service.store, task_id)
+    if combined:
+        assert final.status == "completed" and final.content == "报告已保存。"
+        assert final.work.steps == 1 and final.citations[0].evidence_id == evidence
+    else:
+        assert final.work.stop_reason == "模型连续 3 次输出不符合格式"
+        assert "本轮写的报告已保存" in final.content
+    assert db.get_report(run.id).id == final.work.report_id and db.get_report(run.id).title == "续接报告"
 
 
 @pytest.mark.parametrize("errors, outcome, calls", [
     (["server_error", "rate_limited"], "completed", 3),
     (["server_error"] * 3, "server_error", 3),
+    (["refusal"] * 3, "refusal", 3),
     (["http_error"], "http_error", 1),
+    (["response_not_completed"], "response_not_completed", 1),
 ])
 def test_only_temporary_model_errors_are_retried_and_every_attempt_is_counted(db, monkeypatch, errors, outcome, calls):
     monkeypatch.setattr(agent, "RETRY_DELAYS", (0, 0))
@@ -303,7 +379,7 @@ def test_only_temporary_model_errors_are_retried_and_every_attempt_is_counted(db
         assert final.content == "恢复了。" and len([e for e in events(db, task_id) if e.category == "retry"]) == 2
     else:
         assert final.status == "failed" and final.error_category == outcome
-
+        assert "重新发送这条消息" in final.content and "继续" not in final.content
 
 def test_responses_adapter_format_errors_go_back_to_the_model(db):
     bodies = []
@@ -470,8 +546,10 @@ def delegate_step(papers):
         {"paper_id": p.id, "instruction": "记录方法并给出引文"} for p in papers]}]}
 
 
-def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monkeypatch):
+@pytest.mark.parametrize("model_concurrency, peak", [(3, 2), (1, 1)])
+def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monkeypatch, model_concurrency, peak):
     monkeypatch.setitem(agent.LIMITS, "readers", 2)
+    monkeypatch.setattr(agent, "MODEL_CONCURRENCY", model_concurrency)
     papers = [paper(i) for i in range(3)]
     delegated = {}
 
@@ -483,7 +561,7 @@ def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monke
     service = AgentService(db, model, arxiv=Search(papers), pdf=Pdf())
     task_id = send(service, "调研")
     final = answer(service.store, task_id)
-    assert model.peak == 2
+    assert model.peak == peak
     outcomes = delegated["data"]["results"]
     assert [o["status"] for o in outcomes] == ["done"] * 3 and all(o["evidence"] and o["read"] == "摘要" for o in outcomes)
     assert len(final.citations) == 3 and final.work.subagents == 3
@@ -495,8 +573,33 @@ def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monke
     assert "conversation" not in opening
 
 
+@pytest.mark.parametrize("error, shown", [
+    (LLMError("refusal", "filtered", diagnostic="status=incomplete，reason=content_filter"), "content_filter"),
+    (LLMError("server_error", "HTTP 502"), "server_error"),
+])
+def test_reader_failing_after_retries_ends_that_reader_without_losing_other_results(db, monkeypatch, error, shown):
+    monkeypatch.setattr(agent, "RETRY_DELAYS", (0, 0))
+    papers, delegated = [paper(0), paper(1)], {}
+
+    def summarize(messages):
+        delegated.update(results(messages, "delegate")[0])
+        return reply("第一篇阅读失败，第二篇已记录。")
+
+    model = Model([search_step(2), delegate_step(papers), summarize], readers={
+        papers[0].id: [error] * 3,
+        papers[1].id: reader(papers[1].id, 1),
+    })
+    service = AgentService(db, model, arxiv=Search(papers), pdf=Pdf())
+    task_id = send(service, "调研")
+    outcomes = delegated["data"]["results"]
+    assert [o["status"] for o in outcomes] == ["failed", "done"]
+    assert shown in outcomes[0]["summary"] and outcomes[1]["evidence"]
+    assert len(model.calls("reader:" + papers[0].id)) == 3
+    assert answer(service.store, task_id).status == "completed"
+
+
 def test_readers_stop_at_the_shared_call_limit_and_the_main_agent_wraps_up(db, monkeypatch):
-    monkeypatch.setitem(agent.LIMITS, "calls", 5)
+    monkeypatch.setitem(agent.LIMITS, "calls", 4)
     papers = [paper(0), paper(1)]
     delegated = {}
 
@@ -509,7 +612,7 @@ def test_readers_stop_at_the_shared_call_limit_and_the_main_agent_wraps_up(db, m
     final = answer(service.store, task_id)
     assert [(o["status"], o["summary"]) for o in delegated["data"]["results"]] == [("incomplete", "达到本轮外部调用上限")] * 2
     assert final.content == "预算用完：两篇只读了摘要。" and final.work.stop_reason == "达到本轮外部调用上限"
-    assert final.work.calls == 6
+    assert final.work.calls == 5
 
 
 # --- 上下文压缩与旧数据 ---

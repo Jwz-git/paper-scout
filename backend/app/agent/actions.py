@@ -122,9 +122,9 @@ class MainStep(Action):
     actions: List[MainAction] = Field(min_length=1, max_length=6)
 
     @model_validator(mode="after")
-    def reply_alone(self):
-        if len(self.actions) > 1 and any(a.tool == "reply" for a in self.actions):
-            raise ValueError("reply 必须是这一步唯一的动作")
+    def reply_last(self):
+        if any(a.tool == "reply" for a in self.actions[:-1]):
+            raise ValueError("reply 只能是这一步最后一个动作")
         return self
 
 

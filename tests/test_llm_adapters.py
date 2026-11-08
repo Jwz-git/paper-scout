@@ -225,6 +225,40 @@ def test_incomplete_response_cannot_be_accepted_even_if_text_is_valid_json():
     assert error.value.usage.total_tokens == 12
 
 
+@pytest.mark.parametrize("reason,code,hint", [
+    ("content_filter", "refusal", "内容过滤"),
+    ("max_output_tokens", "incomplete", "长度上限"),
+    (None, "incomplete", "reason=unknown"),
+    ("private_marker", "incomplete", "reason=unknown"),
+    ({"private_marker": True}, "incomplete", "reason=unknown"),
+])
+def test_responses_incomplete_reasons_are_distinguished_without_echoing_unknown_details(reason, code, hint):
+    payload = payload_for(OpenAIResponsesAdapter, '{"ok":true}', {"input_tokens": 5, "output_tokens": 7})
+    payload.update(status="incomplete", incomplete_details={"reason": reason})
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+    assert error.value.code == code and hint in error.value.diagnostic
+    assert "private_marker" not in str(error.value) + error.value.diagnostic
+    assert error.value.usage.total_tokens == 12
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "queued", "in_progress"])
+def test_responses_nonterminal_or_failed_status_is_not_a_json_correction_error(status):
+    payload = payload_for(OpenAIResponsesAdapter, '{"ok":true}')
+    payload["status"] = status
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload, response_format="json_object")
+    assert error.value.code == "response_not_completed"
+
+
+def test_invalid_latex_escape_returns_correction_hint_without_accepting_or_echoing_text():
+    text = r'{"private_marker":"坐标为 \(x,y\)"}'
+    with pytest.raises(LLMError) as error:
+        call_mock(OpenAIResponsesAdapter, payload_for(OpenAIResponsesAdapter, text), response_format="json_object")
+    assert error.value.code == "invalid_json"
+    assert "双反斜杠" in error.value.diagnostic and "private_marker" not in error.value.diagnostic
+
+
 def test_null_chat_content_and_refusal_are_explicit_failures():
     for message, expected in [({"content": None}, "no_text"), ({"content": None, "refusal": "declined"}, "refusal")]:
         with pytest.raises(LLMError) as error:
