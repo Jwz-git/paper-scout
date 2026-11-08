@@ -23,9 +23,9 @@ from backend.app.storage.conversations import ConversationStore
 LIMITS = {"steps": 30, "calls": 150, "seconds": 1800, "fulltexts": 10, "readers": 3, "reader_steps": 8}
 # 达到上限后留给收尾回复的额度。
 FINAL_CALLS, FINAL_SECONDS = 2, 150
-# 所用网关在多个模型请求同时进行时频繁返回 5xx，单个请求正常；子 agent 并行，但模型请求排队。
-MODEL_CONCURRENCY = 1
 RETRY_DELAYS = (2.0, 5.0)
+# 所用网关的限流持续时间未知，实测 2 秒和 5 秒的间隔撑不过去。
+RATE_LIMIT_DELAYS = (20.0, 60.0)
 # 所用网关的内容过滤实测不稳定（同一篇论文时拒时过），按暂时错误有限重试。
 TRANSIENT = {"rate_limited", "timeout", "network_error", "server_error", "refusal"}
 OUTPUT_ERRORS = {"invalid_json", "incomplete", "no_text"}
@@ -204,7 +204,9 @@ class Turn:
         self.clock = time.monotonic()
         self.wrapping, self.limited, self.invalid, self.reminded = False, None, 0, False
         self.fulltexts, self.max_fulltext = 0, LIMITS["fulltexts"]
-        self.model_gate = asyncio.Semaphore(MODEL_CONCURRENCY)
+        # 所用网关在多个模型请求同时进行时频繁返回 5xx，单个请求正常；子 agent 并行，但模型请求排队。
+        # 用 Lock 而不是 Semaphore：Python 3.9 的 Semaphore 不按先后放行，实测一个子 agent 被饿了 16 分钟。
+        self.model_gate = asyncio.Lock()
         self.run = self.db.agent_run(row["task_id"])
         self.usage = self.store.usage(row["task_id"])
         self.base = (self.usage.model_calls, self.usage.total_execution_seconds,
@@ -262,41 +264,42 @@ class Turn:
         self.save()
 
     async def generate(self, messages):
-        # 排到之后才计数和计时：排队中被停止的请求没有发出。
-        async with self.model_gate:
-            await self.external()
-            self.work.model_calls += 1
-            usage = None
+        await self.external()
+        self.work.model_calls += 1
+        usage = None
+        for tokens in self.tokens:
+            tokens.begin()
+        try:
+            response = await asyncio.wait_for(self.llm.generate(messages, response_format="json_object"),
+                                              timeout=max(1.0, self.limit("seconds") - self.elapsed()))
+            usage = response.usage
+            return response
+        except asyncio.TimeoutError:
+            raise LimitReached("达到本轮执行时间上限") from None
+        except LLMError as exc:
+            usage = exc.usage
+            raise
+        finally:
             for tokens in self.tokens:
-                tokens.begin()
-            try:
-                response = await asyncio.wait_for(self.llm.generate(messages, response_format="json_object"),
-                                                  timeout=max(1.0, self.limit("seconds") - self.elapsed()))
-                usage = response.usage
-                return response
-            except asyncio.TimeoutError:
-                raise LimitReached("达到本轮执行时间上限") from None
-            except LLMError as exc:
-                usage = exc.usage
-                raise
-            finally:
-                for tokens in self.tokens:
-                    tokens.end(usage)
-                self.save()
+                tokens.end(usage)
+            self.save()
 
     async def model(self, messages, schema, actor):
         """一次模型决策：暂时性服务错误有限重试；输出格式问题交回调用方，让模型改正。"""
-        for attempt in range(len(RETRY_DELAYS) + 1):
-            try:
-                response = await self.generate(messages)
-                break
-            except LLMError as exc:
-                if exc.code in OUTPUT_ERRORS:
-                    raise InvalidOutput(output_text(exc)) from None
-                if exc.code not in TRANSIENT or attempt == len(RETRY_DELAYS):
-                    raise AgentFailure(exc.code, exc.diagnostic) from None
-                self.event("retry", f"模型调用失败（{exc.code}），{RETRY_DELAYS[attempt]:g} 秒后重试", actor)
-                await asyncio.sleep(RETRY_DELAYS[attempt])
+        # 排到之后才计数和计时：排队中被停止的请求没有发出。重试等待也占住队列：限流是整个网关的状态，其他子 agent 此时发请求只会耗尽各自的重试。
+        async with self.model_gate:
+            for attempt in range(len(RETRY_DELAYS) + 1):
+                try:
+                    response = await self.generate(messages)
+                    break
+                except LLMError as exc:
+                    if exc.code in OUTPUT_ERRORS:
+                        raise InvalidOutput(output_text(exc)) from None
+                    if exc.code not in TRANSIENT or attempt == len(RETRY_DELAYS):
+                        raise AgentFailure(exc.code, exc.diagnostic) from None
+                    delay = (RATE_LIMIT_DELAYS if exc.code == "rate_limited" else RETRY_DELAYS)[attempt]
+                    self.event("retry", f"模型调用失败（{exc.code}），{delay:g} 秒后重试", actor)
+                    await asyncio.sleep(min(delay, max(0.0, self.limit("seconds") - self.elapsed())))
         data = {k: v for k, v in response.parsed_json.items() if k not in OBSERVATION_KEYS}
         try:
             return schema.model_validate(data)

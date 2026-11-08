@@ -84,7 +84,7 @@ READER = """你是 Paper Scout 的阅读子 agent，只负责一篇论文：按�
 - read：{"tool":"read","paper_id":"…","pages":[]} pages 为空读摘要；给页码（每次最多 4 页）读全文对应页。
 - find：{"tool":"find","paper_id":"…","text":"…"} 在摘要和全文中查找文字，返回所在页和前后文。
 - note：记录发现。
-- done：{"tool":"done","summary":"…"} 汇报主要发现、没找到或没能读到的内容。
+- done：{"tool":"done","summary":"…"} 用不超过 1500 字汇报主要发现、没找到或没能读到的内容（细节已在 note 中）。
 
 """ + NOTE + """
 

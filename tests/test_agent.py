@@ -372,6 +372,7 @@ def test_report_is_saved_with_combined_reply_or_reported_after_the_reply_fails(d
 ])
 def test_only_temporary_model_errors_are_retried_and_every_attempt_is_counted(db, monkeypatch, errors, outcome, calls):
     monkeypatch.setattr(agent, "RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(agent, "RATE_LIMIT_DELAYS", (0, 0))
     service = service_with(db, [LLMError(code, "artificial outage") for code in errors] + [reply("恢复了。")])
     task_id = send(service, "你好")
     final = answer(service.store, task_id)
@@ -547,10 +548,8 @@ def delegate_step(papers):
         {"paper_id": p.id, "instruction": "记录方法并给出引文"} for p in papers]}]}
 
 
-@pytest.mark.parametrize("model_concurrency, peak", [(3, 2), (1, 1)])
-def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monkeypatch, model_concurrency, peak):
+def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monkeypatch):
     monkeypatch.setitem(agent.LIMITS, "readers", 2)
-    monkeypatch.setattr(agent, "MODEL_CONCURRENCY", model_concurrency)
     papers = [paper(i) for i in range(3)]
     delegated = {}
 
@@ -562,7 +561,7 @@ def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monke
     service = AgentService(db, model, arxiv=Search(papers), pdf=Pdf())
     task_id = send(service, "调研")
     final = answer(service.store, task_id)
-    assert model.peak == peak
+    assert model.peak == 1
     outcomes = delegated["data"]["results"]
     assert [o["status"] for o in outcomes] == ["done"] * 3 and all(o["evidence"] and o["read"] == "摘要" for o in outcomes)
     assert len(final.citations) == 3 and final.work.subagents == 3
@@ -572,6 +571,20 @@ def test_readers_work_in_parallel_within_the_limit_and_report_evidence(db, monke
     opening = observation(model.calls("reader:" + papers[0].id)[0][:2])
     assert opening["paper"]["paper_id"] == papers[0].id and opening["context"] == "调研长程规划方法"
     assert "conversation" not in opening
+
+
+def test_model_requests_queue_in_order_and_rate_limit_backoff_holds_the_queue(db, monkeypatch):
+    monkeypatch.setattr(agent, "RATE_LIMIT_DELAYS", (0.05, 0.05))
+    papers = [paper(0), paper(1)]
+    first, second = reader(papers[0].id, 0), reader(papers[1].id, 1)
+    model = Model([search_step(2), delegate_step(papers), reply("读完了。")], readers={
+        papers[0].id: [LLMError("rate_limited", "HTTP 429")] + first,
+        papers[1].id: second,
+    }, delay=0.01)
+    service = AgentService(db, model, arxiv=Search(papers), pdf=Pdf())
+    send(service, "调研")
+    a, b = "reader:" + papers[0].id, "reader:" + papers[1].id
+    assert [actor for actor, _ in model.requests if actor != "agent"] == [a, a, b, a, b]
 
 
 @pytest.mark.parametrize("error, shown, attempts", [
